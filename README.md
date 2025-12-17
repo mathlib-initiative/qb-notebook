@@ -5,11 +5,12 @@ Utilities and dependencies for exploring the sanitized parquet dump under `local
 ## Prerequisites
 
 - [`uv`](https://docs.astral.sh/uv/)
+- [`gh`](https://cli.github.com/)
 
 ## Quickstart
 - Sync the environment: `uv sync`
 - Create a venv: `uv venv`
-- Open `.ipynb` notebooks VS Code and select the kernel corresponding to the venv just created
+- Open `.ipynb` notebooks VS Code (or `uv run jupyter lab`) and select the kernel corresponding to the venv just created
 
 ## Useful snippets
 ```python
