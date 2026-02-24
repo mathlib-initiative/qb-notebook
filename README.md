@@ -14,7 +14,7 @@ Utilities and dependencies for exploring the sanitized parquet dump under `local
 
 ## Useful snippets
 ```python
-from download_artifact import download_and_extract_latest_successful_workflow_artifacts
+from qb_notebook.artifacts import download_and_extract_latest_successful_workflow_artifacts
 from pathlib import Path
 import pandas as pd
 import polars as pl
@@ -44,3 +44,27 @@ print(agg)
 - matplotlib, altair, seaborn, plotly for plotting
 - scipy and statsmodels for statistical tests/modeling
 - jupyterlab and ipykernel for notebooks
+
+## Schema variants
+- `qb_notebook.data_io.DEFAULT_DATETIME_COLUMNS` is a queueboard-oriented default, not a universal schema contract.
+- If your dataset has different datetime columns, pass `datetime_columns=` explicitly.
+- Missing columns in the configured list are ignored by `parse_datetime_columns`.
+
+```python
+import polars as pl
+from qb_notebook.data_io import parse_datetime_columns
+
+df_raw = pl.DataFrame(
+    {
+        "created_at": ["2025-02-01 10:00:00.000000+00:00"],
+        "custom_ts": ["2025-02-01 11:30:00.000000+00:00"],
+    }
+)
+
+df = parse_datetime_columns(
+    df_raw,
+    datetime_columns=["created_at", "custom_ts"],
+)
+```
+
+See schema maintenance notes: [`docs/schema-notes.md`](docs/schema-notes.md).
