@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -121,3 +122,56 @@ def download_and_extract_latest_successful_workflow_artifacts(
         "created_at": run.get("createdAt"),
         "extracted_files": extracted_files,
     }
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Download and extract artifact(s) from the latest successful workflow run."
+    )
+    parser.add_argument("--repo", required=True, help="Repository, e.g. owner/name.")
+    parser.add_argument("--workflow", required=True, help="Workflow filename or name.")
+    parser.add_argument(
+        "--out-dir",
+        default="./artifacts",
+        help="Directory where artifacts are extracted.",
+    )
+    parser.add_argument(
+        "--artifact-name",
+        default=None,
+        help="Optional artifact name to download from the run.",
+    )
+    parser.add_argument(
+        "--branch",
+        default=None,
+        help="Optional branch filter for workflow runs.",
+    )
+    parser.add_argument(
+        "--event",
+        default=None,
+        help="Optional event filter for workflow runs.",
+    )
+    parser.add_argument(
+        "--search-limit",
+        type=int,
+        default=50,
+        help="Number of recent runs to inspect for a successful run.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    info = download_and_extract_latest_successful_workflow_artifacts(
+        repo=args.repo,
+        workflow=args.workflow,
+        out_dir=args.out_dir,
+        artifact_name=args.artifact_name,
+        branch=args.branch,
+        event=args.event,
+        search_limit=args.search_limit,
+    )
+    print(json.dumps(info, indent=2))
+
+
+if __name__ == "__main__":
+    main()

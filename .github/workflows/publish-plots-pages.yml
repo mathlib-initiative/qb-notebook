@@ -33,6 +33,18 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
+      - name: Download analytics parquet data
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          uv run python -m qb_notebook.artifacts
+          --repo leanprover-community/queueboard-core
+          --workflow upload_backup.yaml
+          --out-dir ./data
+          --artifact-name analytics-datasets
+          --branch master
+          --search-limit 100
+
       - name: Generate plot site
         env:
           MPLCONFIGDIR: /tmp/matplotlib
