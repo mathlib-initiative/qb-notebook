@@ -128,3 +128,22 @@ daily = effective_open_prs_per_day(
 
 More interval conventions and examples:
 [`docs/intervals.md`](docs/intervals.md).
+
+## Plotting helpers
+- `qb_notebook.plotting` contains reusable plotting utilities for distributions and interval visualizations.
+- Most plotting functions expect a Polars `DataFrame` and a numeric duration column (default: `duration_days`).
+- Distribution-fit functions return fitted parameters (or `None` if insufficient data).
+
+```python
+from qb_notebook.plotting import (
+    plot_duration_hist,
+    plot_lognormal_fit_counts_logbins,
+)
+
+plot_duration_hist(df, col="duration_days", bins=100, logx=True)
+params = plot_lognormal_fit_counts_logbins(df, col="duration_days", bins=100)
+print(params)
+```
+
+More plotting examples and conventions:
+[`docs/plotting.md`](docs/plotting.md).

@@ -45,6 +45,18 @@ from .intervals import (
     with_effective_end,
     with_queue_window_durations,
 )
+from .plotting import (
+    get_x,
+    label_series,
+    plot_duration_hist,
+    plot_duration_hists,
+    plot_hist_and_lognormal_fit_overlays,
+    plot_loglogistic_fit_counts_logbins,
+    plot_lognormal_fit_counts_logbins,
+    plot_swimlane_matplotlib,
+    plot_weibull_fit_counts_logbins,
+    prepare_swimlane_polars,
+)
 
 __all__ = [
     "GHArtifactError",
@@ -84,4 +96,14 @@ __all__ = [
     "snapshot_queue_age_quantiles",
     "with_effective_end",
     "with_queue_window_durations",
+    "get_x",
+    "label_series",
+    "plot_duration_hist",
+    "plot_duration_hists",
+    "plot_hist_and_lognormal_fit_overlays",
+    "plot_loglogistic_fit_counts_logbins",
+    "plot_lognormal_fit_counts_logbins",
+    "plot_swimlane_matplotlib",
+    "plot_weibull_fit_counts_logbins",
+    "prepare_swimlane_polars",
 ]
