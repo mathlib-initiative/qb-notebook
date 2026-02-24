@@ -68,3 +68,63 @@ df = parse_datetime_columns(
 ```
 
 See schema maintenance notes: [`docs/schema-notes.md`](docs/schema-notes.md).
+
+## Filtering helpers
+- Use `qb_notebook.filters` to build composable Polars expressions.
+- `filter_rows(df, *exprs)` is the primary API; `filter_intervals` remains as a compatibility alias.
+- Most helpers support optional column names so the same logic can be reused across schema variants.
+
+```python
+from qb_notebook.filters import (
+    expr_interval_started_between,
+    expr_repo_in,
+    expr_title_regex,
+    filter_rows,
+)
+
+out = filter_rows(
+    df,
+    expr_repo_in([123, 456], repo_col="repository_id"),
+    expr_title_regex(r"^feat", title_col="title"),
+    expr_interval_started_between(
+        start_after="2025-01-01",
+        start_before="2026-01-01",
+        start_col="start",
+    ),
+)
+```
+
+More filtering examples and conventions:
+[`docs/filtering.md`](docs/filtering.md).
+
+## Interval helpers
+- `qb_notebook.intervals` separates raw interval endpoints from effective closed intervals.
+- Use `with_effective_end(...)` as the explicit conversion step when null ends must be closed for computation.
+- Prefer `effective_*` / `snapshot_*` functions for duration/time-series calculations that require non-null interval ends.
+
+```python
+from datetime import datetime, timezone
+from qb_notebook.intervals import (
+    effective_open_prs_per_day,
+    with_effective_end,
+)
+
+asof = datetime.now(tz=timezone.utc)
+
+intervals_eff = with_effective_end(
+    intervals,
+    end_col="end",
+    effective_end_col="end_effective_ts",
+    asof=asof,
+)
+
+daily = effective_open_prs_per_day(
+    intervals_eff,
+    start_col="start",
+    effective_end_col="end_effective_ts",
+    asof=asof,
+)
+```
+
+More interval conventions and examples:
+[`docs/intervals.md`](docs/intervals.md).
