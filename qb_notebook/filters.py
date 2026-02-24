@@ -230,8 +230,3 @@ def filter_rows(df: pl.DataFrame, *exprs: pl.Expr) -> pl.DataFrame:
     for ex in exprs:
         e = e & ex
     return df.filter(e)
-
-
-def filter_intervals(df: pl.DataFrame, *exprs: pl.Expr) -> pl.DataFrame:
-    """Backwards-compatible alias for notebook code."""
-    return filter_rows(df, *exprs)

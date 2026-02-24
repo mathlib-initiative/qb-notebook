@@ -58,7 +58,6 @@ ids = pr_ids_with_any_labels(df_prlabel, df_label_defs, ["new-contributor"])
 filtered = filter_rows(intervals, expr_pr_has_any_of(ids))
 ```
 
-## Compatibility note
+## API note
 
-- `filter_rows(df, *exprs)` is the preferred API.
-- `filter_intervals(df, *exprs)` is kept for notebook compatibility and behaves the same.
+- `filter_rows(df, *exprs)` is the API for combining expression filters.

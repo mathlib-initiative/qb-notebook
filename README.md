@@ -71,7 +71,7 @@ See schema maintenance notes: [`docs/schema-notes.md`](docs/schema-notes.md).
 
 ## Filtering helpers
 - Use `qb_notebook.filters` to build composable Polars expressions.
-- `filter_rows(df, *exprs)` is the primary API; `filter_intervals` remains as a compatibility alias.
+- Use `filter_rows(df, *exprs)` to combine multiple filter expressions.
 - Most helpers support optional column names so the same logic can be reused across schema variants.
 
 ```python

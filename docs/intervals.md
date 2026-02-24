@@ -65,10 +65,10 @@ dur = effective_queue_window_durations(df_qw)
 qs = snapshot_queue_age_quantiles(df_qw, quantiles=[0.75, 0.9])
 ```
 
-## Compatibility wrappers
+## API note
 
-For notebook compatibility, these wrappers are still available:
-- `open_prs_per_day` -> `effective_open_prs_per_day`
-- `queue_prs_per_day` -> `effective_queue_prs_per_day`
-- `with_queue_window_durations` -> `effective_queue_window_durations`
-- `compute_quantiles` -> `snapshot_queue_age_quantiles`
+Use canonical function names directly:
+- `effective_open_prs_per_day`
+- `effective_queue_prs_per_day`
+- `effective_queue_window_durations`
+- `snapshot_queue_age_quantiles`
