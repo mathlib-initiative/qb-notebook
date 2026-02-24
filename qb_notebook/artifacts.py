@@ -104,7 +104,9 @@ def download_and_extract_latest_successful_workflow_artifacts(
 
     _run(dl_cmd)
 
-    extracted_files = sorted(str(p) for p in out_dir.iterdir() if not p.name.startswith("."))
+    extracted_files = sorted(
+        str(p) for p in out_dir.iterdir() if not p.name.startswith(".")
+    )
 
     return {
         "repo": repo,
