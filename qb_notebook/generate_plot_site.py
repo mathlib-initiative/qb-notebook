@@ -170,6 +170,7 @@ def render_merged_per_day(context: dict[str, pl.DataFrame]) -> plt.Figure:
     ax.legend()
     ax.set_xlabel("date (UTC)")
     ax.set_ylabel("PRs merged (14-day moving average)")
+    ax.set_ylim(bottom=0)
     ax.set_title("PRs merged per day (14d avg, title matches 'Merged by Bors')")
     fig.autofmt_xdate(rotation=45)
     fig.tight_layout()
@@ -188,6 +189,7 @@ def render_merged_per_day_year(context: dict[str, pl.DataFrame]) -> plt.Figure:
     ax.legend()
     ax.set_xlabel("date (UTC)")
     ax.set_ylabel("PRs merged (14-day moving average)")
+    ax.set_ylim(bottom=0)
     ax.set_title(
         "PRs merged per day (14d avg, title matches 'Merged by Bors', last 365 days)"
     )
