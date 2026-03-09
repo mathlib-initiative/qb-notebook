@@ -27,6 +27,10 @@ class PlotDefinition:
     render: Callable[[dict[str, pl.DataFrame]], plt.Figure]
 
 
+def _qw3_asof(context: dict[str, pl.DataFrame]) -> datetime:
+    return context["df_qw3"].select(pl.max("updated_at")).item()
+
+
 def _load_context(data_dir: Path) -> dict[str, pl.DataFrame]:
     tables = load_pr_interval_data(data_dir)
     queue_windows = split_queue_windows_by_rule(
@@ -54,7 +58,9 @@ def _load_context(data_dir: Path) -> dict[str, pl.DataFrame]:
 
 def render_qw3_age_percentiles(context: dict[str, pl.DataFrame]) -> plt.Figure:
     quantiles = [0.75, 0.90]
-    pdf = snapshot_queue_age_quantiles(context["df_qw3"], quantiles).to_pandas()
+    pdf = snapshot_queue_age_quantiles(
+        context["df_qw3"], quantiles, asof=_qw3_asof(context)
+    ).to_pandas()
 
     fig, ax = plt.subplots(figsize=(9, 4.5))
     for q in quantiles:
@@ -71,7 +77,9 @@ def render_qw3_age_percentiles(context: dict[str, pl.DataFrame]) -> plt.Figure:
 
 def render_qw3_age_percentiles_year(context: dict[str, pl.DataFrame]) -> plt.Figure:
     quantiles = [0.75, 0.90]
-    pdf = snapshot_queue_age_quantiles(context["df_qw3"], quantiles).to_pandas()
+    pdf = snapshot_queue_age_quantiles(
+        context["df_qw3"], quantiles, asof=_qw3_asof(context)
+    ).to_pandas()
     if not pdf.empty:
         cutoff = pdf["date"].max() - timedelta(days=365)
         pdf = pdf[pdf["date"] > cutoff]
@@ -91,12 +99,13 @@ def render_qw3_age_percentiles_year(context: dict[str, pl.DataFrame]) -> plt.Fig
 
 
 def _build_qw3_feat_nonfeat_daily(context: dict[str, pl.DataFrame]) -> pl.DataFrame:
-    daily_feat = effective_queue_prs_per_day(context["df_qw3_feat"]).rename(
+    asof = _qw3_asof(context)
+    daily_feat = effective_queue_prs_per_day(context["df_qw3_feat"], asof=asof).rename(
         {"prs_on_queue": "feat"}
     )
-    daily_nonfeat = effective_queue_prs_per_day(context["df_qw3_nonfeat"]).rename(
-        {"prs_on_queue": "non_feat"}
-    )
+    daily_nonfeat = effective_queue_prs_per_day(
+        context["df_qw3_nonfeat"], asof=asof
+    ).rename({"prs_on_queue": "non_feat"})
     return (
         daily_feat.join(daily_nonfeat, on="day", how="full", coalesce=True)
         .with_columns(pl.col("feat").fill_null(0), pl.col("non_feat").fill_null(0))
