@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -31,7 +31,7 @@ def _load_context(data_dir: Path) -> dict[str, pl.DataFrame]:
     return {
         "df_qw1": queue_windows[1],
         "df_qw2": queue_windows[2],
-        "df_qw3": queue_windows[2],
+        "df_qw3": queue_windows[3],
     }
 
 
@@ -52,8 +52,32 @@ def render_qw3_age_percentiles(context: dict[str, pl.DataFrame]) -> plt.Figure:
     fig.tight_layout()
     return fig
 
+def render_qw3_age_percentiles_year(context: dict[str, pl.DataFrame]) -> plt.Figure:
+    quantiles = [0.75, 0.90]
+    pdf = snapshot_queue_age_quantiles(context["df_qw3"], quantiles).to_pandas()
+    if not pdf.empty:
+        cutoff = pdf["date"].max() - timedelta(days=365)
+        pdf = pdf[pdf["date"] > cutoff]
+
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    for q in quantiles:
+        col = f"p{int(q * 100)}"
+        ax.plot(pdf["date"], pdf[col], label=col)
+
+    ax.legend()
+    ax.set_xlabel("date (UTC)")
+    ax.set_ylabel("age (days) at end-of-day")
+    ax.set_title("Queue window age percentiles over time (last 365 days)")
+    fig.autofmt_xdate(rotation=45)
+    fig.tight_layout()
+    return fig
 
 PLOTS: list[PlotDefinition] = [
+    PlotDefinition(
+        title="Queue window age percentiles over time (df_qw3, last 365 days)",
+        output_filename="queue-window-age-percentiles-qw3-last-year.png",
+        render=render_qw3_age_percentiles_year,
+    ),
     PlotDefinition(
         title="Queue window age percentiles over time (df_qw3)",
         output_filename="queue-window-age-percentiles-qw3.png",
