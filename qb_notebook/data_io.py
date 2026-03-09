@@ -89,7 +89,7 @@ def load_pr_interval_data(data_dir: str | Path = "data") -> dict[str, pl.DataFra
 def split_queue_windows_by_rule(
     df_queue_windows: pl.DataFrame,
     *,
-    rule_set_ids: Iterable[int] = (1, 2),
+    rule_set_ids: Iterable[int] = (1, 2, 3),
 ) -> dict[int, pl.DataFrame]:
     """Return filtered queue-window frames keyed by rule_set_id."""
     return {

@@ -26,17 +26,18 @@ class PlotDefinition:
 def _load_context(data_dir: Path) -> dict[str, pl.DataFrame]:
     tables = load_pr_interval_data(data_dir)
     queue_windows = split_queue_windows_by_rule(
-        tables["queue_windows"], rule_set_ids=(1, 2)
+        tables["queue_windows"], rule_set_ids=(1, 2, 3)
     )
     return {
         "df_qw1": queue_windows[1],
         "df_qw2": queue_windows[2],
+        "df_qw3": queue_windows[2],
     }
 
 
-def render_qw1_age_percentiles(context: dict[str, pl.DataFrame]) -> plt.Figure:
+def render_qw3_age_percentiles(context: dict[str, pl.DataFrame]) -> plt.Figure:
     quantiles = [0.75, 0.90]
-    pdf = snapshot_queue_age_quantiles(context["df_qw1"], quantiles).to_pandas()
+    pdf = snapshot_queue_age_quantiles(context["df_qw3"], quantiles).to_pandas()
 
     fig, ax = plt.subplots(figsize=(9, 4.5))
     for q in quantiles:
@@ -54,9 +55,9 @@ def render_qw1_age_percentiles(context: dict[str, pl.DataFrame]) -> plt.Figure:
 
 PLOTS: list[PlotDefinition] = [
     PlotDefinition(
-        title="Queue window age percentiles over time (df_qw1)",
-        output_filename="queue-window-age-percentiles-qw1.png",
-        render=render_qw1_age_percentiles,
+        title="Queue window age percentiles over time (df_qw3)",
+        output_filename="queue-window-age-percentiles-qw3.png",
+        render=render_qw3_age_percentiles,
     ),
 ]
 
