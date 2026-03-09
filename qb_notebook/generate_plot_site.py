@@ -11,7 +11,11 @@ import matplotlib.pyplot as plt
 import polars as pl
 
 from qb_notebook.data_io import load_pr_interval_data, split_queue_windows_by_rule
-from qb_notebook.intervals import snapshot_queue_age_quantiles
+from qb_notebook.intervals import (
+    effective_queue_prs_per_day,
+    enrich_intervals_with_prs,
+    snapshot_queue_age_quantiles,
+)
 
 matplotlib.use("Agg")
 
@@ -28,10 +32,16 @@ def _load_context(data_dir: Path) -> dict[str, pl.DataFrame]:
     queue_windows = split_queue_windows_by_rule(
         tables["queue_windows"], rule_set_ids=(1, 2, 3)
     )
+    df_qw3_enriched = enrich_intervals_with_prs(queue_windows[3], tables["prs"])
+    feat_expr = pl.col("title").fill_null("").str.contains(
+        r"(^feat)|(^\[Merged by Bors\] -\s+[fF]eat)", literal=False
+    )
     return {
         "df_qw1": queue_windows[1],
         "df_qw2": queue_windows[2],
         "df_qw3": queue_windows[3],
+        "df_qw3_feat": df_qw3_enriched.filter(feat_expr),
+        "df_qw3_nonfeat": df_qw3_enriched.filter(~feat_expr),
     }
 
 
@@ -72,6 +82,58 @@ def render_qw3_age_percentiles_year(context: dict[str, pl.DataFrame]) -> plt.Fig
     fig.tight_layout()
     return fig
 
+
+def _build_qw3_feat_nonfeat_daily(context: dict[str, pl.DataFrame]) -> pl.DataFrame:
+    daily_feat = effective_queue_prs_per_day(context["df_qw3_feat"]).rename(
+        {"prs_on_queue": "feat"}
+    )
+    daily_nonfeat = effective_queue_prs_per_day(context["df_qw3_nonfeat"]).rename(
+        {"prs_on_queue": "non_feat"}
+    )
+    return (
+        daily_feat.join(daily_nonfeat, on="day", how="full", coalesce=True)
+        .with_columns(pl.col("feat").fill_null(0), pl.col("non_feat").fill_null(0))
+        .sort("day")
+    )
+
+
+def render_qw3_feat_nonfeat_queue_counts(context: dict[str, pl.DataFrame]) -> plt.Figure:
+    pdf = _build_qw3_feat_nonfeat_daily(context).to_pandas()
+
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    ax.plot(pdf["day"], pdf["feat"], label="feat")
+    ax.plot(pdf["day"], pdf["non_feat"], label="non-feat")
+
+    ax.legend()
+    ax.set_xlabel("date (UTC)")
+    ax.set_ylabel("PRs on queue")
+    ax.set_title("Queue window 3 PRs on queue: feat vs non-feat")
+    fig.autofmt_xdate(rotation=45)
+    fig.tight_layout()
+    return fig
+
+
+def render_qw3_feat_nonfeat_queue_counts_year(
+    context: dict[str, pl.DataFrame],
+) -> plt.Figure:
+    pdf = _build_qw3_feat_nonfeat_daily(context).to_pandas()
+    if not pdf.empty:
+        cutoff = pdf["day"].max() - timedelta(days=365)
+        pdf = pdf[pdf["day"] > cutoff]
+
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    ax.plot(pdf["day"], pdf["feat"], label="feat")
+    ax.plot(pdf["day"], pdf["non_feat"], label="non-feat")
+
+    ax.legend()
+    ax.set_xlabel("date (UTC)")
+    ax.set_ylabel("PRs on queue")
+    ax.set_title("Queue window 3 PRs on queue: feat vs non-feat (last 365 days)")
+    fig.autofmt_xdate(rotation=45)
+    fig.tight_layout()
+    return fig
+
+
 PLOTS: list[PlotDefinition] = [
     PlotDefinition(
         title="Queue window age percentiles over time (df_qw3, last 365 days)",
@@ -82,6 +144,16 @@ PLOTS: list[PlotDefinition] = [
         title="Queue window age percentiles over time (df_qw3)",
         output_filename="queue-window-age-percentiles-qw3.png",
         render=render_qw3_age_percentiles,
+    ),
+    PlotDefinition(
+        title="Queue window 3 PRs on queue: feat vs non-feat (last 365 days)",
+        output_filename="queue-window-prs-feat-vs-nonfeat-qw3-last-year.png",
+        render=render_qw3_feat_nonfeat_queue_counts_year,
+    ),
+    PlotDefinition(
+        title="Queue window 3 PRs on queue: feat vs non-feat",
+        output_filename="queue-window-prs-feat-vs-nonfeat-qw3.png",
+        render=render_qw3_feat_nonfeat_queue_counts,
     ),
 ]
 
