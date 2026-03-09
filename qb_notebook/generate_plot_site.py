@@ -32,6 +32,12 @@ def _load_context(data_dir: Path) -> dict[str, pl.DataFrame]:
     queue_windows = split_queue_windows_by_rule(
         tables["queue_windows"], rule_set_ids=(1, 2, 3)
     )
+    df_merged = tables["prs"].filter(
+        pl.col("closed_at").is_not_null()
+        & pl.col("title")
+        .fill_null("")
+        .str.contains(r"(?i)^\[Merged by Bors\] -", literal=False)
+    )
     df_qw3_enriched = enrich_intervals_with_prs(queue_windows[3], tables["prs"])
     feat_expr = pl.col("title").fill_null("").str.contains(
         r"(^feat)|(^\[Merged by Bors\] -\s+[fF]eat)", literal=False
@@ -42,6 +48,7 @@ def _load_context(data_dir: Path) -> dict[str, pl.DataFrame]:
         "df_qw3": queue_windows[3],
         "df_qw3_feat": df_qw3_enriched.filter(feat_expr),
         "df_qw3_nonfeat": df_qw3_enriched.filter(~feat_expr),
+        "df_merged": df_merged,
     }
 
 
@@ -134,6 +141,52 @@ def render_qw3_feat_nonfeat_queue_counts_year(
     return fig
 
 
+def _build_merged_per_day(context: dict[str, pl.DataFrame]) -> pl.DataFrame:
+    return (
+        context["df_merged"]
+        .with_columns(pl.col("closed_at").dt.truncate("1d").alias("date"))
+        .group_by("date")
+        .agg(pl.len().alias("prs_merged"))
+        .with_columns(pl.col("prs_merged").rolling_mean(14).alias("prs_merged_14d_avg"))
+        .sort("date")
+    )
+
+
+def render_merged_per_day(context: dict[str, pl.DataFrame]) -> plt.Figure:
+    pdf = _build_merged_per_day(context).to_pandas()
+
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    ax.plot(pdf["date"], pdf["prs_merged_14d_avg"], label="Merged by Bors (14d avg)")
+
+    ax.legend()
+    ax.set_xlabel("date (UTC)")
+    ax.set_ylabel("PRs merged (14-day moving average)")
+    ax.set_title("PRs merged per day (14d avg, title matches 'Merged by Bors')")
+    fig.autofmt_xdate(rotation=45)
+    fig.tight_layout()
+    return fig
+
+
+def render_merged_per_day_year(context: dict[str, pl.DataFrame]) -> plt.Figure:
+    pdf = _build_merged_per_day(context).to_pandas()
+    if not pdf.empty:
+        cutoff = pdf["date"].max() - timedelta(days=365)
+        pdf = pdf[pdf["date"] > cutoff]
+
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    ax.plot(pdf["date"], pdf["prs_merged_14d_avg"], label="Merged by Bors (14d avg)")
+
+    ax.legend()
+    ax.set_xlabel("date (UTC)")
+    ax.set_ylabel("PRs merged (14-day moving average)")
+    ax.set_title(
+        "PRs merged per day (14d avg, title matches 'Merged by Bors', last 365 days)"
+    )
+    fig.autofmt_xdate(rotation=45)
+    fig.tight_layout()
+    return fig
+
+
 PLOTS: list[PlotDefinition] = [
     PlotDefinition(
         title="Queue window age percentiles over time (df_qw3, last 365 days)",
@@ -154,6 +207,16 @@ PLOTS: list[PlotDefinition] = [
         title="Queue window 3 PRs on queue: feat vs non-feat",
         output_filename="queue-window-prs-feat-vs-nonfeat-qw3.png",
         render=render_qw3_feat_nonfeat_queue_counts,
+    ),
+    PlotDefinition(
+        title="PRs merged per day (14d avg, title matches 'Merged by Bors', last 365 days)",
+        output_filename="prs-merged-per-day-bors-last-year.png",
+        render=render_merged_per_day_year,
+    ),
+    PlotDefinition(
+        title="PRs merged per day (14d avg, title matches 'Merged by Bors')",
+        output_filename="prs-merged-per-day-bors.png",
+        render=render_merged_per_day,
     ),
 ]
 
