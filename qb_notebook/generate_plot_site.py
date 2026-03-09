@@ -12,7 +12,6 @@ import polars as pl
 
 from qb_notebook.data_io import load_pr_interval_data, split_queue_windows_by_rule
 from qb_notebook.intervals import (
-    effective_queue_prs_per_day,
     enrich_intervals_with_prs,
     snapshot_queue_age_quantiles,
 )
@@ -100,12 +99,40 @@ def render_qw3_age_percentiles_year(context: dict[str, pl.DataFrame]) -> plt.Fig
 
 def _build_qw3_feat_nonfeat_daily(context: dict[str, pl.DataFrame]) -> pl.DataFrame:
     asof = _qw3_asof(context)
-    daily_feat = effective_queue_prs_per_day(context["df_qw3_feat"], asof=asof).rename(
-        {"prs_on_queue": "feat"}
-    )
-    daily_nonfeat = effective_queue_prs_per_day(
-        context["df_qw3_nonfeat"], asof=asof
-    ).rename({"prs_on_queue": "non_feat"})
+
+    def _daily_counts(df: pl.DataFrame, out_col: str) -> pl.DataFrame:
+        return (
+            df.with_columns(
+                pl.coalesce([pl.col("to_ts"), pl.col("closed_at"), pl.lit(asof)]).alias(
+                    "to_ts_effective"
+                )
+            )
+            .select(
+                [
+                    pl.col("pull_request_id"),
+                    pl.col("from_ts").dt.date().alias("start_day"),
+                    (pl.col("to_ts_effective") - pl.duration(microseconds=1))
+                    .dt.date()
+                    .alias("end_day"),
+                ]
+            )
+            .filter(pl.col("end_day") >= pl.col("start_day"))
+            .with_columns(
+                pl.date_ranges(
+                    pl.col("start_day"),
+                    pl.col("end_day"),
+                    interval="1d",
+                    closed="both",
+                ).alias("day")
+            )
+            .explode("day")
+            .group_by("day")
+            .agg(pl.col("pull_request_id").n_unique().alias(out_col))
+            .sort("day")
+        )
+
+    daily_feat = _daily_counts(context["df_qw3_feat"], "feat")
+    daily_nonfeat = _daily_counts(context["df_qw3_nonfeat"], "non_feat")
     return (
         daily_feat.join(daily_nonfeat, on="day", how="full", coalesce=True)
         .with_columns(pl.col("feat").fill_null(0), pl.col("non_feat").fill_null(0))
