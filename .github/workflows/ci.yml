@@ -21,10 +21,10 @@ jobs:
         run: uv sync --dev --frozen
 
       - name: Run Ruff
-        run: uv run ruff check qb_notebook tests download_artifact.py
+        run: uv run ruff check .
 
       - name: Run Ruff format check
-        run: uv run ruff format --check qb_notebook tests download_artifact.py
+        run: uv run ruff format --check .
 
   tests:
     name: Pytest

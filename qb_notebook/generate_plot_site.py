@@ -42,8 +42,10 @@ def _load_context(data_dir: Path) -> dict[str, pl.DataFrame]:
         .str.contains(r"(?i)^\[Merged by Bors\] -", literal=False)
     )
     df_qw3_enriched = enrich_intervals_with_prs(queue_windows[3], tables["prs"])
-    feat_expr = pl.col("title").fill_null("").str.contains(
-        r"(^feat)|(^\[Merged by Bors\] -\s+[fF]eat)", literal=False
+    feat_expr = (
+        pl.col("title")
+        .fill_null("")
+        .str.contains(r"(^feat)|(^\[Merged by Bors\] -\s+[fF]eat)", literal=False)
     )
     return {
         "df_qw1": queue_windows[1],
@@ -73,6 +75,7 @@ def render_qw3_age_percentiles(context: dict[str, pl.DataFrame]) -> plt.Figure:
     fig.autofmt_xdate(rotation=45)
     fig.tight_layout()
     return fig
+
 
 def render_qw3_age_percentiles_year(context: dict[str, pl.DataFrame]) -> plt.Figure:
     quantiles = [0.75, 0.90]
@@ -140,7 +143,9 @@ def _build_qw3_feat_nonfeat_daily(context: dict[str, pl.DataFrame]) -> pl.DataFr
     )
 
 
-def render_qw3_feat_nonfeat_queue_counts(context: dict[str, pl.DataFrame]) -> plt.Figure:
+def render_qw3_feat_nonfeat_queue_counts(
+    context: dict[str, pl.DataFrame],
+) -> plt.Figure:
     pdf = _build_qw3_feat_nonfeat_daily(context).to_pandas()
 
     fig, ax = plt.subplots(figsize=(9, 4.5))

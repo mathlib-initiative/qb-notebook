@@ -22,9 +22,15 @@ This file gives coding agents repo-specific guidance for `qb-notebook`.
 - Run a single test file:
   - `uv run pytest tests/test_intervals.py`
 - Lint:
-  - `uv run ruff check`
+  - `uv run ruff check .`
+- CI lint target:
+  - `uv run ruff check qb_notebook tests download_artifact.py`
 - Format:
-  - `uv run ruff format`
+  - `uv run ruff format .`
+- Format check (all Python files):
+  - `uv run ruff format --check .`
+- CI format check:
+  - `uv run ruff format --check qb_notebook tests download_artifact.py`
 
 ## Data Expectations
 
