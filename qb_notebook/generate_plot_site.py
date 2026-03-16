@@ -18,6 +18,8 @@ from qb_notebook.intervals import (
 
 matplotlib.use("Agg")
 
+NON_YEAR_PLOT_START = datetime(2023, 1, 1, tzinfo=timezone.utc)
+
 
 @dataclass(frozen=True)
 class PlotDefinition:
@@ -28,6 +30,12 @@ class PlotDefinition:
 
 def _qw3_asof(context: dict[str, pl.DataFrame]) -> datetime:
     return context["df_qw3"].select(pl.max("updated_at")).item()
+
+
+def _filter_since(pdf, date_col: str, start: datetime):
+    if pdf.empty:
+        return pdf
+    return pdf[pdf[date_col] >= start]
 
 
 def _load_context(data_dir: Path) -> dict[str, pl.DataFrame]:
@@ -62,6 +70,7 @@ def render_qw3_age_percentiles(context: dict[str, pl.DataFrame]) -> plt.Figure:
     pdf = snapshot_queue_age_quantiles(
         context["df_qw3"], quantiles, asof=_qw3_asof(context)
     ).to_pandas()
+    pdf = _filter_since(pdf, "date", NON_YEAR_PLOT_START)
 
     fig, ax = plt.subplots(figsize=(9, 4.5))
     for q in quantiles:
@@ -147,6 +156,7 @@ def render_qw3_feat_nonfeat_queue_counts(
     context: dict[str, pl.DataFrame],
 ) -> plt.Figure:
     pdf = _build_qw3_feat_nonfeat_daily(context).to_pandas()
+    pdf = _filter_since(pdf, "day", NON_YEAR_PLOT_START)
 
     fig, ax = plt.subplots(figsize=(9, 4.5))
     ax.plot(pdf["day"], pdf["feat"], label="feat")
@@ -195,6 +205,7 @@ def _build_merged_per_day(context: dict[str, pl.DataFrame]) -> pl.DataFrame:
 
 def render_merged_per_day(context: dict[str, pl.DataFrame]) -> plt.Figure:
     pdf = _build_merged_per_day(context).to_pandas()
+    pdf = _filter_since(pdf, "date", NON_YEAR_PLOT_START)
 
     fig, ax = plt.subplots(figsize=(9, 4.5))
     ax.plot(pdf["date"], pdf["prs_merged_14d_avg"], label="Merged by Bors (14d avg)")
