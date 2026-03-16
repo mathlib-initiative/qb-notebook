@@ -42,7 +42,17 @@ def _qw3_asof(context: dict[str, pl.DataFrame]) -> datetime:
 def _filter_since(pdf, date_col: str, start: datetime):
     if pdf.empty:
         return pdf
-    return pdf[pdf[date_col] >= start]
+    series = pdf[date_col]
+    try:
+        series_tz = series.dt.tz
+    except AttributeError:
+        return pdf[series >= start.date()]
+
+    if series_tz is None:
+        start_cmp = start.replace(tzinfo=None)
+    else:
+        start_cmp = start.astimezone(series_tz)
+    return pdf[series >= start_cmp]
 
 
 def _load_context(data_dir: Path) -> dict[str, pl.DataFrame]:
