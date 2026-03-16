@@ -19,6 +19,13 @@ from qb_notebook.intervals import (
 matplotlib.use("Agg")
 
 NON_YEAR_PLOT_START = datetime(2023, 1, 1, tzinfo=timezone.utc)
+SERIES_COLORS = {
+    "p75": "#1f77b4",
+    "p90": "#d62728",
+    "feat": "#2ca02c",
+    "non_feat": "#ff7f0e",
+    "merged_14d_avg": "#9467bd",
+}
 
 
 @dataclass(frozen=True)
@@ -75,7 +82,7 @@ def render_qw3_age_percentiles(context: dict[str, pl.DataFrame]) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(9, 4.5))
     for q in quantiles:
         col = f"p{int(q * 100)}"
-        ax.plot(pdf["date"], pdf[col], label=col)
+        ax.plot(pdf["date"], pdf[col], label=col, color=SERIES_COLORS[col])
 
     ax.legend()
     ax.set_xlabel("date (UTC)")
@@ -98,7 +105,7 @@ def render_qw3_age_percentiles_year(context: dict[str, pl.DataFrame]) -> plt.Fig
     fig, ax = plt.subplots(figsize=(9, 4.5))
     for q in quantiles:
         col = f"p{int(q * 100)}"
-        ax.plot(pdf["date"], pdf[col], label=col)
+        ax.plot(pdf["date"], pdf[col], label=col, color=SERIES_COLORS[col])
 
     ax.legend()
     ax.set_xlabel("date (UTC)")
@@ -159,8 +166,13 @@ def render_qw3_feat_nonfeat_queue_counts(
     pdf = _filter_since(pdf, "day", NON_YEAR_PLOT_START)
 
     fig, ax = plt.subplots(figsize=(9, 4.5))
-    ax.plot(pdf["day"], pdf["feat"], label="feat")
-    ax.plot(pdf["day"], pdf["non_feat"], label="non-feat")
+    ax.plot(pdf["day"], pdf["feat"], label="feat", color=SERIES_COLORS["feat"])
+    ax.plot(
+        pdf["day"],
+        pdf["non_feat"],
+        label="non-feat",
+        color=SERIES_COLORS["non_feat"],
+    )
 
     ax.legend()
     ax.set_xlabel("date (UTC)")
@@ -180,8 +192,13 @@ def render_qw3_feat_nonfeat_queue_counts_year(
         pdf = pdf[pdf["day"] > cutoff]
 
     fig, ax = plt.subplots(figsize=(9, 4.5))
-    ax.plot(pdf["day"], pdf["feat"], label="feat")
-    ax.plot(pdf["day"], pdf["non_feat"], label="non-feat")
+    ax.plot(pdf["day"], pdf["feat"], label="feat", color=SERIES_COLORS["feat"])
+    ax.plot(
+        pdf["day"],
+        pdf["non_feat"],
+        label="non-feat",
+        color=SERIES_COLORS["non_feat"],
+    )
 
     ax.legend()
     ax.set_xlabel("date (UTC)")
@@ -208,7 +225,12 @@ def render_merged_per_day(context: dict[str, pl.DataFrame]) -> plt.Figure:
     pdf = _filter_since(pdf, "date", NON_YEAR_PLOT_START)
 
     fig, ax = plt.subplots(figsize=(9, 4.5))
-    ax.plot(pdf["date"], pdf["prs_merged_14d_avg"], label="Merged by Bors (14d avg)")
+    ax.plot(
+        pdf["date"],
+        pdf["prs_merged_14d_avg"],
+        label="Merged by Bors (14d avg)",
+        color=SERIES_COLORS["merged_14d_avg"],
+    )
 
     ax.legend()
     ax.set_xlabel("date (UTC)")
@@ -227,7 +249,12 @@ def render_merged_per_day_year(context: dict[str, pl.DataFrame]) -> plt.Figure:
         pdf = pdf[pdf["date"] > cutoff]
 
     fig, ax = plt.subplots(figsize=(9, 4.5))
-    ax.plot(pdf["date"], pdf["prs_merged_14d_avg"], label="Merged by Bors (14d avg)")
+    ax.plot(
+        pdf["date"],
+        pdf["prs_merged_14d_avg"],
+        label="Merged by Bors (14d avg)",
+        color=SERIES_COLORS["merged_14d_avg"],
+    )
 
     ax.legend()
     ax.set_xlabel("date (UTC)")
