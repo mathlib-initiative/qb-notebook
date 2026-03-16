@@ -97,7 +97,7 @@ def render_qw3_age_percentiles(context: dict[str, pl.DataFrame]) -> plt.Figure:
     ax.legend()
     ax.set_xlabel("date (UTC)")
     ax.set_ylabel("age (days) at end-of-day")
-    ax.set_title("Queue window age percentiles over time")
+    ax.set_title("Queue window age percentiles over time (since 2023-01-01)")
     fig.autofmt_xdate(rotation=45)
     fig.tight_layout()
     return fig
@@ -187,7 +187,7 @@ def render_qw3_feat_nonfeat_queue_counts(
     ax.legend()
     ax.set_xlabel("date (UTC)")
     ax.set_ylabel("PRs on queue")
-    ax.set_title("Queue window 3 PRs on queue: feat vs non-feat")
+    ax.set_title("Queue window 3 PRs on queue: feat vs non-feat (since 2023-01-01)")
     fig.autofmt_xdate(rotation=45)
     fig.tight_layout()
     return fig
@@ -246,7 +246,7 @@ def render_merged_per_day(context: dict[str, pl.DataFrame]) -> plt.Figure:
     ax.set_xlabel("date (UTC)")
     ax.set_ylabel("PRs merged (14-day moving average)")
     ax.set_ylim(bottom=0)
-    ax.set_title("PRs merged per day (14d avg, title matches 'Merged by Bors')")
+    ax.set_title("PRs merged per day (14d avg, title matches 'Merged by Bors', since 2023-01-01)")
     fig.autofmt_xdate(rotation=45)
     fig.tight_layout()
     return fig
