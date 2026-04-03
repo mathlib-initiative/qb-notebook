@@ -225,31 +225,43 @@ def _build_merged_per_day(context: dict[str, pl.DataFrame]) -> pl.DataFrame:
         .with_columns(pl.col("closed_at").dt.truncate("1d").alias("date"))
         .group_by("date")
         .agg(pl.len().alias("prs_merged"))
+        .sort("date")  # must sort before rolling_mean; Polars rolling_mean is row-order-based, not time-based
         .with_columns(pl.col("prs_merged").rolling_mean(14).alias("prs_merged_14d_avg"))
-        .sort("date")
     )
+
+
+def _render_merged_per_day(pdf, title) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    ax.bar(
+        pdf["date"],
+        pdf["prs_merged"],
+        alpha=0.3,
+        label="daily count",
+        color=SERIES_COLORS["merged_14d_avg"],
+        width=1,
+    )
+    ax.plot(
+        pdf["date"],
+        pdf["prs_merged_14d_avg"],
+        label="14d avg",
+        color=SERIES_COLORS["merged_14d_avg"],
+    )
+    ax.legend()
+    ax.set_xlabel("date (UTC)")
+    ax.set_ylabel("PRs merged")
+    ax.set_ylim(bottom=0)
+    ax.set_title(title)
+    fig.autofmt_xdate(rotation=45)
+    fig.tight_layout()
+    return fig
 
 
 def render_merged_per_day(context: dict[str, pl.DataFrame]) -> plt.Figure:
     pdf = _build_merged_per_day(context).to_pandas()
     pdf = _filter_since(pdf, "date", NON_YEAR_PLOT_START)
-
-    fig, ax = plt.subplots(figsize=(9, 4.5))
-    ax.plot(
-        pdf["date"],
-        pdf["prs_merged_14d_avg"],
-        label="Merged by Bors (14d avg)",
-        color=SERIES_COLORS["merged_14d_avg"],
+    return _render_merged_per_day(
+        pdf, "PRs merged per day (14d avg, title matches 'Merged by Bors', since 2023-01-01)"
     )
-
-    ax.legend()
-    ax.set_xlabel("date (UTC)")
-    ax.set_ylabel("PRs merged (14-day moving average)")
-    ax.set_ylim(bottom=0)
-    ax.set_title("PRs merged per day (14d avg, title matches 'Merged by Bors', since 2023-01-01)")
-    fig.autofmt_xdate(rotation=45)
-    fig.tight_layout()
-    return fig
 
 
 def render_merged_per_day_year(context: dict[str, pl.DataFrame]) -> plt.Figure:
@@ -257,25 +269,9 @@ def render_merged_per_day_year(context: dict[str, pl.DataFrame]) -> plt.Figure:
     if not pdf.empty:
         cutoff = pdf["date"].max() - timedelta(days=365)
         pdf = pdf[pdf["date"] > cutoff]
-
-    fig, ax = plt.subplots(figsize=(9, 4.5))
-    ax.plot(
-        pdf["date"],
-        pdf["prs_merged_14d_avg"],
-        label="Merged by Bors (14d avg)",
-        color=SERIES_COLORS["merged_14d_avg"],
+    return _render_merged_per_day(
+        pdf, "PRs merged per day (14d avg, title matches 'Merged by Bors', last 365 days)"
     )
-
-    ax.legend()
-    ax.set_xlabel("date (UTC)")
-    ax.set_ylabel("PRs merged (14-day moving average)")
-    ax.set_ylim(bottom=0)
-    ax.set_title(
-        "PRs merged per day (14d avg, title matches 'Merged by Bors', last 365 days)"
-    )
-    fig.autofmt_xdate(rotation=45)
-    fig.tight_layout()
-    return fig
 
 
 PLOTS: list[PlotDefinition] = [
