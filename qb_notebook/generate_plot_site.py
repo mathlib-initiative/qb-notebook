@@ -225,7 +225,9 @@ def _build_merged_per_day(context: dict[str, pl.DataFrame]) -> pl.DataFrame:
         .with_columns(pl.col("closed_at").dt.truncate("1d").alias("date"))
         .group_by("date")
         .agg(pl.len().alias("prs_merged"))
-        .sort("date")  # must sort before rolling_mean; Polars rolling_mean is row-order-based, not time-based
+        .sort(
+            "date"
+        )  # must sort before rolling_mean; Polars rolling_mean is row-order-based, not time-based
         .with_columns(pl.col("prs_merged").rolling_mean(14).alias("prs_merged_14d_avg"))
     )
 
@@ -260,7 +262,8 @@ def render_merged_per_day(context: dict[str, pl.DataFrame]) -> plt.Figure:
     pdf = _build_merged_per_day(context).to_pandas()
     pdf = _filter_since(pdf, "date", NON_YEAR_PLOT_START)
     return _render_merged_per_day(
-        pdf, "PRs merged per day (14d avg, title matches 'Merged by Bors', since 2023-01-01)"
+        pdf,
+        "PRs merged per day (14d avg, title matches 'Merged by Bors', since 2023-01-01)",
     )
 
 
@@ -270,7 +273,8 @@ def render_merged_per_day_year(context: dict[str, pl.DataFrame]) -> plt.Figure:
         cutoff = pdf["date"].max() - timedelta(days=365)
         pdf = pdf[pdf["date"] > cutoff]
     return _render_merged_per_day(
-        pdf, "PRs merged per day (14d avg, title matches 'Merged by Bors', last 365 days)"
+        pdf,
+        "PRs merged per day (14d avg, title matches 'Merged by Bors', last 365 days)",
     )
 
 
