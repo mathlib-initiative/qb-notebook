@@ -412,8 +412,8 @@ PLOTS: list[PlotDefinition] = [
 def _write_index(site_dir: Path, plots: list[PlotDefinition]) -> None:
     generated_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     sections = "\n".join(
-        f"""    <section class="card">
-      <h2>{plot.title}</h2>
+        f"""    <section class="card" id="{plot.output_filename.removesuffix(".png")}">
+      <h2><a href="#{plot.output_filename.removesuffix(".png")}">{plot.title}</a></h2>
       <img src="images/{plot.output_filename}" alt="{plot.title}" loading="lazy" />
     </section>"""
         for plot in plots
