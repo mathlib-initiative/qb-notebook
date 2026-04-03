@@ -258,7 +258,9 @@ def _render_merged_per_day(pdf, title) -> plt.Figure:
     return fig
 
 
-def _build_merged_feat_nonfeat_per_day(context: dict[str, pl.DataFrame]) -> pl.DataFrame:
+def _build_merged_feat_nonfeat_per_day(
+    context: dict[str, pl.DataFrame],
+) -> pl.DataFrame:
     feat_expr = (
         pl.col("title")
         .fill_null("")
@@ -273,8 +275,12 @@ def _build_merged_feat_nonfeat_per_day(context: dict[str, pl.DataFrame]) -> pl.D
             df.filter(mask)
             .group_by("date")
             .agg(pl.len().alias("prs_merged"))
-            .sort("date")  # must sort before rolling_mean; Polars rolling_mean is row-order-based, not time-based
-            .with_columns(pl.col("prs_merged").rolling_mean(14).alias("prs_merged_14d_avg"))
+            .sort(
+                "date"
+            )  # must sort before rolling_mean; Polars rolling_mean is row-order-based, not time-based
+            .with_columns(
+                pl.col("prs_merged").rolling_mean(14).alias("prs_merged_14d_avg")
+            )
         )
 
     daily_feat = _daily(feat_expr).rename(
