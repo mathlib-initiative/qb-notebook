@@ -258,6 +258,87 @@ def _render_merged_per_day(pdf, title) -> plt.Figure:
     return fig
 
 
+def _build_merged_feat_nonfeat_per_day(context: dict[str, pl.DataFrame]) -> pl.DataFrame:
+    feat_expr = (
+        pl.col("title")
+        .fill_null("")
+        .str.contains(r"^\[Merged by Bors\] -\s+[fF]eat", literal=False)
+    )
+    df = context["df_merged"].with_columns(
+        pl.col("closed_at").dt.truncate("1d").alias("date")
+    )
+
+    def _daily(mask) -> pl.DataFrame:
+        return (
+            df.filter(mask)
+            .group_by("date")
+            .agg(pl.len().alias("prs_merged"))
+            .sort("date")  # must sort before rolling_mean; Polars rolling_mean is row-order-based, not time-based
+            .with_columns(pl.col("prs_merged").rolling_mean(14).alias("prs_merged_14d_avg"))
+        )
+
+    daily_feat = _daily(feat_expr).rename(
+        {"prs_merged": "feat", "prs_merged_14d_avg": "feat_14d_avg"}
+    )
+    daily_nonfeat = _daily(~feat_expr).rename(
+        {"prs_merged": "non_feat", "prs_merged_14d_avg": "non_feat_14d_avg"}
+    )
+    return (
+        daily_feat.join(daily_nonfeat, on="date", how="full", coalesce=True)
+        .with_columns(
+            pl.col("feat").fill_null(0),
+            pl.col("non_feat").fill_null(0),
+        )
+        .sort("date")
+    )
+
+
+def _render_merged_feat_nonfeat_per_day(pdf, title) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    ax.plot(
+        pdf["date"],
+        pdf["feat_14d_avg"],
+        label="feat (14d avg)",
+        color=SERIES_COLORS["feat"],
+    )
+    ax.plot(
+        pdf["date"],
+        pdf["non_feat_14d_avg"],
+        label="non-feat (14d avg)",
+        color=SERIES_COLORS["non_feat"],
+    )
+    ax.legend()
+    ax.set_xlabel("date (UTC)")
+    ax.set_ylabel("PRs merged")
+    ax.set_ylim(bottom=0)
+    ax.set_title(title)
+    fig.autofmt_xdate(rotation=45)
+    fig.tight_layout()
+    return fig
+
+
+def render_merged_feat_nonfeat_per_day(context: dict[str, pl.DataFrame]) -> plt.Figure:
+    pdf = _build_merged_feat_nonfeat_per_day(context).to_pandas()
+    pdf = _filter_since(pdf, "date", NON_YEAR_PLOT_START)
+    return _render_merged_feat_nonfeat_per_day(
+        pdf,
+        "PRs merged per day: feat vs non-feat (14d avg, since 2023-01-01)",
+    )
+
+
+def render_merged_feat_nonfeat_per_day_year(
+    context: dict[str, pl.DataFrame],
+) -> plt.Figure:
+    pdf = _build_merged_feat_nonfeat_per_day(context).to_pandas()
+    if not pdf.empty:
+        cutoff = pdf["date"].max() - timedelta(days=365)
+        pdf = pdf[pdf["date"] > cutoff]
+    return _render_merged_feat_nonfeat_per_day(
+        pdf,
+        "PRs merged per day: feat vs non-feat (14d avg, last 365 days)",
+    )
+
+
 def render_merged_per_day(context: dict[str, pl.DataFrame]) -> plt.Figure:
     pdf = _build_merged_per_day(context).to_pandas()
     pdf = _filter_since(pdf, "date", NON_YEAR_PLOT_START)
@@ -308,6 +389,16 @@ PLOTS: list[PlotDefinition] = [
         title="PRs merged per day (14d avg, title matches 'Merged by Bors')",
         output_filename="prs-merged-per-day-bors.png",
         render=render_merged_per_day,
+    ),
+    PlotDefinition(
+        title="PRs merged per day: feat vs non-feat (14d avg, last 365 days)",
+        output_filename="prs-merged-per-day-feat-vs-nonfeat-last-year.png",
+        render=render_merged_feat_nonfeat_per_day_year,
+    ),
+    PlotDefinition(
+        title="PRs merged per day: feat vs non-feat (14d avg)",
+        output_filename="prs-merged-per-day-feat-vs-nonfeat.png",
+        render=render_merged_feat_nonfeat_per_day,
     ),
 ]
 
