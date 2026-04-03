@@ -454,6 +454,13 @@ def _write_index(site_dir: Path, plots: list[PlotDefinition]) -> None:
         margin-bottom: 1.25rem;
         color: #425466;
       }}
+      a {{
+        all: unset;
+      }}
+      a:hover {{
+        text-decoration: underline;
+        cursor: pointer;
+      }}
     </style>
   </head>
   <body>
