@@ -222,6 +222,20 @@ def expr_pr_lacks_any_of(
     return ~pl.col(pr_id_col).is_in(pr_ids.implode())
 
 
+def expr_commenters_include_any(
+    logins: list[str],
+    *,
+    commenters_col: str = "commenters",
+) -> pl.Expr:
+    """Match rows where the JSON-encoded commenters list contains any of the given logins."""
+    parsed = (
+        pl.col(commenters_col)
+        .fill_null("[]")
+        .str.json_decode(pl.List(pl.String))
+    )
+    return parsed.list.eval(pl.element().is_in(logins)).list.any()
+
+
 def filter_rows(df: pl.DataFrame, *exprs: pl.Expr) -> pl.DataFrame:
     """Apply multiple Polars boolean expressions as filters."""
     if not exprs:

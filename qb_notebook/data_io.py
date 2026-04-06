@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
@@ -84,6 +86,51 @@ def load_pr_interval_data(data_dir: str | Path = "data") -> dict[str, pl.DataFra
         "prlabel": _read_and_parse(root / "syncer_prlabel.parquet"),
         "queue_windows": _read_and_parse(root / "analyzer_prqueuewindow.parquet"),
     }
+
+
+@dataclass
+class ContributorInterval:
+    start: str | None = None
+    end: str | None = None
+
+
+@dataclass
+class ContributorEntry:
+    login: str
+    intervals: list[ContributorInterval] = field(default_factory=list)
+
+
+def load_contributor_config(path: str | Path) -> list[ContributorEntry]:
+    """Load a contributor config JSON file.
+
+    Expected format::
+
+        [
+            {
+                "login": "octocat",
+                "intervals": [
+                    {"start": "2024-01-01", "end": "2024-12-31"},
+                    {"start": "2025-06-01", "end": null}
+                ]
+            }
+        ]
+
+    The ``intervals`` list records the time ranges during which each contributor
+    was active.  It is stored for future use; current filters ignore it and match
+    solely on login.
+    """
+    with open(path) as f:
+        data = json.load(f)
+    return [
+        ContributorEntry(
+            login=entry["login"],
+            intervals=[
+                ContributorInterval(start=iv.get("start"), end=iv.get("end"))
+                for iv in entry.get("intervals", [])
+            ],
+        )
+        for entry in data
+    ]
 
 
 def split_queue_windows_by_rule(

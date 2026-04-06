@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import polars as pl
 
 from qb_notebook.filters import (
+    expr_commenters_include_any,
     expr_interval_started_between,
     expr_repo_in,
     expr_title_regex,
@@ -88,3 +89,30 @@ def test_expr_interval_started_between_with_string_dates() -> None:
     )
     assert out.height == 1
     assert out["window_start"][0] == datetime(2025, 2, 1, tzinfo=timezone.utc)
+
+
+def test_expr_commenters_include_any_matches_login() -> None:
+    df = pl.DataFrame(
+        {
+            "id": [1, 2, 3],
+            "commenters": [
+                '["alice", "bob"]',
+                '["carol"]',
+                None,
+            ],
+        }
+    )
+    out = df.filter(expr_commenters_include_any(["bob", "dave"]))
+    assert out["id"].to_list() == [1]
+
+
+def test_expr_commenters_include_any_null_treated_as_empty() -> None:
+    df = pl.DataFrame({"id": [1], "commenters": [None]})
+    out = df.filter(expr_commenters_include_any(["alice"]))
+    assert out.is_empty()
+
+
+def test_expr_commenters_include_any_empty_logins_matches_nothing() -> None:
+    df = pl.DataFrame({"id": [1], "commenters": ['["alice"]']})
+    out = df.filter(expr_commenters_include_any([]))
+    assert out.is_empty()

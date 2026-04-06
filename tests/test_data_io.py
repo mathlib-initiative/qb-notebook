@@ -1,6 +1,16 @@
 import polars as pl
 
-from qb_notebook.data_io import DEFAULT_DATETIME_COLUMNS, parse_datetime_columns
+import json
+import os
+import tempfile
+
+from qb_notebook.data_io import (
+    DEFAULT_DATETIME_COLUMNS,
+    ContributorEntry,
+    ContributorInterval,
+    load_contributor_config,
+    parse_datetime_columns,
+)
 
 
 def test_parse_datetime_columns_ignores_missing_columns() -> None:
@@ -49,3 +59,53 @@ def test_parse_datetime_columns_parses_default_known_column() -> None:
     assert out.schema["created_at"] == pl.Datetime("us", "UTC")
     assert out.height == 2
     assert out["created_at"].null_count() == 0
+
+
+def test_load_contributor_config_basic() -> None:
+    data = [
+        {
+            "login": "octocat",
+            "intervals": [{"start": "2024-01-01", "end": "2024-12-31"}],
+        },
+        {"login": "monalisa", "intervals": []},
+    ]
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(data, f)
+        path = f.name
+    try:
+        config = load_contributor_config(path)
+    finally:
+        os.unlink(path)
+
+    assert len(config) == 2
+    assert config[0] == ContributorEntry(
+        login="octocat",
+        intervals=[ContributorInterval(start="2024-01-01", end="2024-12-31")],
+    )
+    assert config[1] == ContributorEntry(login="monalisa", intervals=[])
+
+
+def test_load_contributor_config_missing_intervals_key() -> None:
+    data = [{"login": "octocat"}]
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(data, f)
+        path = f.name
+    try:
+        config = load_contributor_config(path)
+    finally:
+        os.unlink(path)
+
+    assert config[0].intervals == []
+
+
+def test_load_contributor_config_null_interval_bounds() -> None:
+    data = [{"login": "octocat", "intervals": [{"start": "2024-01-01", "end": None}]}]
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(data, f)
+        path = f.name
+    try:
+        config = load_contributor_config(path)
+    finally:
+        os.unlink(path)
+
+    assert config[0].intervals[0] == ContributorInterval(start="2024-01-01", end=None)
