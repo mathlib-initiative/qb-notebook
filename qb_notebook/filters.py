@@ -228,11 +228,7 @@ def expr_commenters_include_any(
     commenters_col: str = "commenters",
 ) -> pl.Expr:
     """Match rows where the JSON-encoded commenters list contains any of the given logins."""
-    parsed = (
-        pl.col(commenters_col)
-        .fill_null("[]")
-        .str.json_decode(pl.List(pl.String))
-    )
+    parsed = pl.col(commenters_col).fill_null("[]").str.json_decode(pl.List(pl.String))
     return parsed.list.eval(pl.element().is_in(logins)).list.any()
 
 
