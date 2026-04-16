@@ -3,8 +3,10 @@ from datetime import datetime, timezone
 import polars as pl
 
 from qb_notebook.filters import (
+    expr_closed_by_event_type,
     expr_commenters_include_any,
     expr_interval_started_between,
+    expr_opened_by_event_type,
     expr_repo_in,
     expr_title_regex,
     filter_rows,
@@ -116,3 +118,41 @@ def test_expr_commenters_include_any_empty_logins_matches_nothing() -> None:
     df = pl.DataFrame({"id": [1], "commenters": ['["alice"]']})
     out = df.filter(expr_commenters_include_any([]))
     assert out.is_empty()
+
+
+def test_expr_opened_by_event_type_matches() -> None:
+    df = pl.DataFrame(
+        {
+            "id": [1, 2, 3, 4],
+            "opened_by_event_type": [
+                "CI_PASSED",
+                "INITIAL_STATE",
+                "FORBIDDEN_LABEL_REMOVED",
+                None,
+            ],
+        }
+    )
+    out = df.filter(expr_opened_by_event_type(["CI_PASSED", "INITIAL_STATE"]))
+    assert sorted(out["id"].to_list()) == [1, 2]
+
+
+def test_expr_closed_by_event_type_matches() -> None:
+    df = pl.DataFrame(
+        {
+            "id": [1, 2, 3, 4],
+            "closed_by_event_type": [
+                "CI_FAILED",
+                "FORBIDDEN_LABEL_ADDED",
+                "HEAD_PUSHED",
+                None,
+            ],
+        }
+    )
+    out = df.filter(expr_closed_by_event_type(["CI_FAILED"]))
+    assert out["id"].to_list() == [1]
+
+
+def test_expr_opened_by_event_type_custom_col() -> None:
+    df = pl.DataFrame({"id": [1, 2], "etype": ["CI_PASSED", "PR_OPENED"]})
+    out = df.filter(expr_opened_by_event_type(["PR_OPENED"], event_type_col="etype"))
+    assert out["id"].to_list() == [2]

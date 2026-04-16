@@ -232,6 +232,24 @@ def expr_commenters_include_any(
     return parsed.list.eval(pl.element().is_in(logins)).list.any()
 
 
+def expr_opened_by_event_type(
+    event_types: list[str],
+    *,
+    event_type_col: str = "opened_by_event_type",
+) -> pl.Expr:
+    """Match queue window rows where opened_by_event_type is one of the given values."""
+    return pl.col(event_type_col).is_in(event_types)
+
+
+def expr_closed_by_event_type(
+    event_types: list[str],
+    *,
+    event_type_col: str = "closed_by_event_type",
+) -> pl.Expr:
+    """Match queue window rows where closed_by_event_type is one of the given values."""
+    return pl.col(event_type_col).is_in(event_types)
+
+
 def filter_rows(df: pl.DataFrame, *exprs: pl.Expr) -> pl.DataFrame:
     """Apply multiple Polars boolean expressions as filters."""
     if not exprs:

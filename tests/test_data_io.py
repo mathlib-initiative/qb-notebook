@@ -8,6 +8,7 @@ from qb_notebook.data_io import (
     DEFAULT_DATETIME_COLUMNS,
     ContributorEntry,
     ContributorInterval,
+    _cast_float_to_nullable_int,
     load_contributor_config,
     parse_datetime_columns,
 )
@@ -109,3 +110,28 @@ def test_load_contributor_config_null_interval_bounds() -> None:
         os.unlink(path)
 
     assert config[0].intervals[0] == ContributorInterval(start="2024-01-01", end=None)
+
+
+def test_cast_float_to_nullable_int_converts_known_cols() -> None:
+    df = pl.DataFrame(
+        {
+            "opened_by_timeline_event_id": [1.0, None, 3.0],
+            "closed_by_check_run_id": [None, 2.0, None],
+            "other_col": ["a", "b", "c"],
+        }
+    )
+    out = _cast_float_to_nullable_int(
+        df, ["opened_by_timeline_event_id", "closed_by_check_run_id"]
+    )
+
+    assert out.schema["opened_by_timeline_event_id"] == pl.Int64
+    assert out.schema["closed_by_check_run_id"] == pl.Int64
+    assert out.schema["other_col"] == pl.String
+    assert out["opened_by_timeline_event_id"].to_list() == [1, None, 3]
+    assert out["closed_by_check_run_id"].to_list() == [None, 2, None]
+
+
+def test_cast_float_to_nullable_int_ignores_missing_cols() -> None:
+    df = pl.DataFrame({"id": [1, 2]})
+    out = _cast_float_to_nullable_int(df, ["nonexistent_col"])
+    assert out.to_dict(as_series=False) == df.to_dict(as_series=False)

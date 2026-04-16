@@ -7,6 +7,17 @@ from typing import Iterable
 
 import polars as pl
 
+# FK columns on analyzer_prqueuewindow that Django exports as Float64
+# (nullable integer columns come out as float in pandas/parquet exports).
+_QUEUE_WINDOW_FK_COLS: tuple[str, ...] = (
+    "opened_by_check_run_id",
+    "opened_by_status_context_id",
+    "opened_by_timeline_event_id",
+    "closed_by_check_run_id",
+    "closed_by_status_context_id",
+    "closed_by_timeline_event_id",
+)
+
 # `%#z` parses offsets like +00:00 in the current Polars/chrono combo.
 _DEFAULT_DATETIME_FORMAT = "%Y-%m-%d %T%.f%#z"
 
@@ -67,6 +78,21 @@ def _read_and_parse(path: Path) -> pl.DataFrame:
     return parse_datetime_columns(pl.read_parquet(path))
 
 
+def _cast_float_to_nullable_int(
+    df: pl.DataFrame,
+    cols: Iterable[str],
+) -> pl.DataFrame:
+    """Cast Float64 columns to Int64, preserving nulls.
+
+    Django exports nullable integer FK columns as Float64 when there are null
+    values. This restores them to proper integer dtype.
+    """
+    cols_present = [c for c in cols if c in df.columns]
+    if not cols_present:
+        return df
+    return df.with_columns([pl.col(c).cast(pl.Int64) for c in cols_present])
+
+
 def load_pr_interval_data(data_dir: str | Path = "data") -> dict[str, pl.DataFrame]:
     """
     Load and parse core queueboard tables used by pr_intervals analyses.
@@ -77,14 +103,23 @@ def load_pr_interval_data(data_dir: str | Path = "data") -> dict[str, pl.DataFra
     - syncer_labeldef.parquet
     - syncer_prlabel.parquet
     - analyzer_prqueuewindow.parquet
+    - syncer_commitcheckrun.parquet
+    - syncer_commitstatuscontext.parquet
+
+    The ``queue_windows`` frame has its FK columns cast from Float64 to Int64
+    (nullable integers are exported as float by the Django/parquet pipeline).
     """
     root = Path(data_dir)
+    qw_raw = _read_and_parse(root / "analyzer_prqueuewindow.parquet")
+    qw = _cast_float_to_nullable_int(qw_raw, _QUEUE_WINDOW_FK_COLS)
     return {
         "prs": _read_and_parse(root / "syncer_pullrequest.parquet"),
         "events": _read_and_parse(root / "syncer_prtimelineevent.parquet"),
         "label_defs": _read_and_parse(root / "syncer_labeldef.parquet"),
         "prlabel": _read_and_parse(root / "syncer_prlabel.parquet"),
-        "queue_windows": _read_and_parse(root / "analyzer_prqueuewindow.parquet"),
+        "queue_windows": qw,
+        "check_runs": _read_and_parse(root / "syncer_commitcheckrun.parquet"),
+        "status_contexts": _read_and_parse(root / "syncer_commitstatuscontext.parquet"),
     }
 
 
