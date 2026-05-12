@@ -278,35 +278,81 @@ Theme 4 / Theme 5 for any "did label X overlap interval Y" question).
 
 ### Theme 4 — Topic-area health (`t-*` labels)
 
-**Status: planned. Requires area-label whitelist.**
+**Status: shipped (`marimo/area_health.py`,
+`qb_notebook.review_states.labels_active_at`).**
 
 **Question**: Are any topic areas under-reviewed, slower than others, or
 losing reviewer coverage?
 
+**Attribution model**: per-PR per-area intervals come from
+`label_intervals(events, t_labels)` over `LABELED`/`UNLABELED` events
+on the 24 `t-*` labels in `syncer_labeldef`. A PR with multiple `t-*`
+labels contributes to every area it carries (resolved open question).
+Throughput and reviewer-trigger attribution use the area(s) **active
+at the relevant timestamp** — merge time for throughput, attributed
+trigger time for reviewer activity — via
+`labels_active_at(intervals, points)`.
+
 **Plots / metrics**:
 
-- Per-area: current open PR count, median age, throughput (merges/month),
-  active reviewer count over the last 90 days.
-- Heatmap: area × month, cell = median time-to-merge.
-- Per-area reviewer overlap: which reviewers sign off PRs in which areas?
-  Bipartite graph or matrix.
-- Areas with declining `maintainer-merge` activity over the last 6 months.
+- Current open backlog by area: PR count, median age, p90 age
+  (joined from `prlabel` current-state).
+- Throughput heatmap: area × month, color = log1p(merges).
+- Per-area throughput summary (last 365d) with median + p90 TTM.
+- Reviewer-court latency by area: for each `t-*` application,
+  `label_overlap_seconds` against `reviewers_court_intervals`; per-area
+  median / p90 court-days + share of applications that overlap the
+  reviewer's court at all.
+- Active reviewer coverage by area (last 30d): distinct attributed
+  `maintainer-merge` trigger actors per area at trigger time.
+- Top-N reviewers × top-N areas matrix (color = log1p of attributed
+  triggers all-time).
+- Declining coverage sweep: 30d vs prior 30d attributed-trigger counts
+  per area; areas with ≥30 % drop and ≥5 prior-window triggers are
+  flagged.
 
 **Data**: `prs`, `prlabel`, `label_defs` (filtered to `t-*`), `events`,
-`queue_windows`, team-membership YAML.
+`queue_windows`. Team-membership YAML is not currently consumed — the
+attribution heuristic is shared with Theme 2 and exposes the human
+trigger directly; a follow-up could overlay team labels on the
+reviewer × area matrix.
 
-**Output**: `area_health.ipynb` + per-area summary table on the plot site.
+**Output**: `marimo/area_health.py` +
+`qb_notebook.review_states.labels_active_at` (reused by future themes
+that need "which label was active when event E fired" lookups, e.g.
+Theme 5 for size buckets per area).
 
-**Open questions**:
-- A PR can have multiple `t-*` labels — count toward each, or pick one
-  (e.g. first applied)?
+**Notes from implementation**:
 
-**Notes**:
-- Use `reviewers_court_intervals` (cross-cutting infra below) for the
-  "active reviewer count" and any per-area reviewer-court latency
-  computations, so the metric is comparable across mathlib4's full
-  history rather than disappearing after the `awaiting-review`
-  retirement.
+- ~17 % of merged-to-master PRs in the last year carry no `t-*` label
+  at merge time. They drop out of all per-area throughput / latency
+  numbers. The per-area totals are therefore a lower bound on real
+  area work; the un-tagged share is roughly stable month-over-month
+  so the *relative* area rankings are still meaningful.
+- Two `t-*` labels (`t-condensed`, `t-geometric-group-theory`) have
+  zero current open PRs. They still appear in the throughput table
+  but with very small N — sort by activity so they fall to the
+  bottom rather than dropping them.
+- The `t-*` taxonomy was rolled out incrementally: initial batch in
+  2023-07 (`t-algebra`, `t-topology`, `t-analysis`, `t-number-theory`,
+  `t-measure-probability`; `t-meta` predates by ~6 months), `t-data`
+  in 2024-08, then `t-ring-theory` and `t-group-theory` (carved out
+  of `t-algebra`) in 2025-08. The heatmap overlays a white circle on
+  each row at the area's first-LABELED month so the dark left edge
+  isn't misread as inactivity. `label_defs.created_at` is **not** a
+  reliable introduction date — it's just when the syncer inserted
+  the row.
+- The bipartite matrix uses *attributed* trigger counts only — the
+  bot `LABELED` actors are excluded by `attribute_label_events` upstream.
+- "Reviewer-court latency by area" restricts to area applications that
+  overlap the last 2 years to keep the metric representative of modern
+  review tempo; the helper itself has no time filter so callers can
+  widen the window if needed.
+- 30d-vs-prior-30d declining-coverage sweep is intentionally noisy —
+  the 30-day window was chosen for reactivity even though smaller
+  areas can swing wildly. Areas with a *zero* prior-window count get
+  `pct_change = null` rather than ±∞, and are excluded from the
+  `declining` flag.
 
 ---
 
@@ -350,9 +396,18 @@ These keep showing up in multiple themes and should be implemented once:
   generic per-PR interval-vs-window overlap. Given the output of
   `label_intervals` for one label and a per-PR window frame, sums
   intersections in seconds and adds a `had_overlap` flag. Lives in
-  `qb_notebook/review_states.py`. Used by Theme 3; ready for Themes
-  4 / 5 wherever a "did label X happen during interval Y" question
-  comes up. ✅ shipped.
+  `qb_notebook/review_states.py`. Used by Themes 3 and 4 (per-area
+  reviewer-court latency); ready for Theme 5 wherever a "did label X
+  happen during interval Y" question comes up. ✅ shipped.
+- **`labels_active_at(intervals, points) -> points + label_name`** —
+  for each `(pull_request_id, timestamp)` point in `points`, return one
+  row per label interval active at that time (half-open
+  `[start, end_effective)`). Points with no active interval drop out;
+  points with multiple matching labels emit one row each (count-each
+  semantics). Lives in `qb_notebook/review_states.py`. Used by Theme 4
+  to attribute merges and reviewer triggers to active `t-*` areas;
+  ready for Theme 5 for "which area was the PR in when X happened"
+  size/contributor cuts. ✅ shipped.
 - **`teams.load(repo_path) -> {reviewers, maintainers, admins, ...: set[login]}`** —
   parse `data/people.yaml` + `data/teams.yaml` from a checkout of
   `leanprover-community.github.io` and return sets of GitHub logins per
@@ -390,7 +445,7 @@ code.
 | 2       | Theme 2: reviewer load         | `marimo/reviewer_load.py` + `qb_notebook/teams.py`       | shipped  |
 | 3       | Theme 3: bottlenecks           | `marimo/bottleneck_localization.py`                      | shipped  |
 | 3.5     | Theme 1 companion (queue)      | `marimo/queue_window_state.py` + `queue_window_intervals`| shipped  |
-| 4       | Theme 4: area health           | `area_health.ipynb`                                      | planned  |
+| 4       | Theme 4: area health           | `marimo/area_health.py` + `labels_active_at`             | shipped  |
 | 5       | Theme 5: PR shape              | `pr_shape_effects.ipynb`                                 | planned  |
 | 6       | Plot site polish               | promote best plots from each notebook                    | planned  |
 

@@ -18,10 +18,13 @@ analyzed and compared with the same downstream helpers.
 This module also exposes :func:`attribute_label_events`, which
 attributes a bot-applied label (e.g. `maintainer-merge`,
 `ready-to-merge`) to the human who triggered it via a comment or
-review event shortly before the label was applied, and
+review event shortly before the label was applied,
 :func:`label_overlap_seconds`, a generic per-PR interval-vs-window
 overlap helper used wherever a "did state X cover interval Y" question
-shows up.
+shows up, and :func:`labels_active_at`, which given a set of
+``(pull_request_id, timestamp)`` points returns the label intervals
+that were active at each point — the "which area / state was this PR
+in when event E fired" lookup used by per-area attribution.
 """
 
 from __future__ import annotations
@@ -424,6 +427,65 @@ def label_overlap_seconds(
         .with_columns((pl.col(overlap_col) > 0).alias(had_overlap_col))
         .drop("_row_idx")
     )
+
+
+def labels_active_at(
+    df_intervals: pl.DataFrame,
+    df_points: pl.DataFrame,
+    *,
+    point_pr_col: str = "pull_request_id",
+    point_time_col: str = "at",
+    interval_pr_col: str = "pull_request_id",
+    interval_start_col: str = "start",
+    interval_end_col: str = "end_effective",
+    interval_label_col: str = "label_name",
+) -> pl.DataFrame:
+    """Find label intervals active at each ``(pull_request_id, timestamp)`` point.
+
+    Joins ``df_points`` to ``df_intervals`` on ``pull_request_id`` and keeps
+    rows where ``interval_start_col <= point_time_col < interval_end_col``.
+    The interval frame is typically the output of :func:`label_intervals`
+    for one or more labels (using ``end_effective`` closes any still-open
+    intervals at ``asof``); the points frame is one row per event you want
+    to attribute to a label state — e.g. a `LABELED(maintainer-merge)`
+    timestamp, or a PR's effective merge time, for the "which `t-*` area
+    was this PR in when X happened" question.
+
+    A point with N active intervals produces N output rows (so callers can
+    decide whether to count each area or pick one). Points with no active
+    interval get no row in the output; left-join to recover them if
+    needed.
+
+    Returns ``df_points`` columns plus a ``label_name`` column carrying
+    the interval label. Other columns from ``df_intervals`` are dropped to
+    keep the output small.
+    """
+    points_indexed = df_points.with_row_index("_point_idx")
+    pts = points_indexed.select(
+        [
+            "_point_idx",
+            pl.col(point_pr_col).alias("_pr"),
+            pl.col(point_time_col).alias("_at"),
+        ]
+    ).drop_nulls(["_pr", "_at"])
+
+    ints = df_intervals.select(
+        [
+            pl.col(interval_pr_col).alias("_pr"),
+            pl.col(interval_start_col).alias("_istart"),
+            pl.col(interval_end_col).alias("_iend"),
+            pl.col(interval_label_col).alias("label_name"),
+        ]
+    ).drop_nulls(["_pr", "_istart", "_iend", "label_name"])
+
+    matched = (
+        pts.join(ints, on="_pr", how="inner")
+        .filter(
+            (pl.col("_at") >= pl.col("_istart")) & (pl.col("_at") < pl.col("_iend"))
+        )
+        .select(["_point_idx", "label_name"])
+    )
+    return points_indexed.join(matched, on="_point_idx", how="inner").drop("_point_idx")
 
 
 _COURT_COMMON_COLS = (

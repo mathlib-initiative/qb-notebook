@@ -6,6 +6,7 @@ from qb_notebook.review_states import (
     attribute_label_events,
     label_intervals,
     label_overlap_seconds,
+    labels_active_at,
     queue_window_intervals,
     reviewers_court_intervals,
     stage_timestamps,
@@ -653,6 +654,152 @@ def test_overlap_drops_null_interval_endpoints() -> None:
     )
     out = label_overlap_seconds(ivals, wins)
     assert out["overlap_seconds"].to_list() == [86400.0]
+
+
+# ---- labels_active_at ------------------------------------------------------
+
+
+def _label_intervals_frame(rows: list[dict]) -> pl.DataFrame:
+    return pl.DataFrame(
+        rows,
+        schema={
+            "pull_request_id": pl.Int64,
+            "label_name": pl.String,
+            "start": pl.Datetime("us", "UTC"),
+            "end_effective": pl.Datetime("us", "UTC"),
+        },
+    )
+
+
+def _points_frame(rows: list[dict]) -> pl.DataFrame:
+    return pl.DataFrame(
+        rows,
+        schema={
+            "pull_request_id": pl.Int64,
+            "at": pl.Datetime("us", "UTC"),
+            "actor": pl.String,
+        },
+    )
+
+
+def test_labels_active_at_single_match() -> None:
+    ivals = _label_intervals_frame(
+        [
+            {
+                "pull_request_id": 1,
+                "label_name": "t-algebra",
+                "start": _dt(1),
+                "end_effective": _dt(5),
+            },
+        ]
+    )
+    points = _points_frame([{"pull_request_id": 1, "at": _dt(3), "actor": "alice"}])
+    out = labels_active_at(ivals, points)
+    assert out.height == 1
+    assert out["label_name"].to_list() == ["t-algebra"]
+    assert out["actor"].to_list() == ["alice"]
+
+
+def test_labels_active_at_multiple_labels_per_point() -> None:
+    # PR has two t-* labels both active at the point's timestamp; the helper
+    # should emit one row per matching label (count-toward-each-area model).
+    ivals = _label_intervals_frame(
+        [
+            {
+                "pull_request_id": 1,
+                "label_name": "t-algebra",
+                "start": _dt(1),
+                "end_effective": _dt(10),
+            },
+            {
+                "pull_request_id": 1,
+                "label_name": "t-ring-theory",
+                "start": _dt(2),
+                "end_effective": _dt(8),
+            },
+            {
+                "pull_request_id": 1,
+                "label_name": "t-analysis",
+                "start": _dt(20),
+                "end_effective": _dt(25),
+            },
+        ]
+    )
+    points = _points_frame([{"pull_request_id": 1, "at": _dt(5), "actor": "alice"}])
+    out = labels_active_at(ivals, points).sort("label_name")
+    assert out["label_name"].to_list() == ["t-algebra", "t-ring-theory"]
+
+
+def test_labels_active_at_half_open_interval() -> None:
+    # `start` is inclusive, `end_effective` is exclusive: a point exactly at
+    # `end_effective` does NOT match, a point exactly at `start` does.
+    ivals = _label_intervals_frame(
+        [
+            {
+                "pull_request_id": 1,
+                "label_name": "t-algebra",
+                "start": _dt(2),
+                "end_effective": _dt(4),
+            },
+        ]
+    )
+    points = _points_frame(
+        [
+            {"pull_request_id": 1, "at": _dt(2), "actor": "start_edge"},
+            {"pull_request_id": 1, "at": _dt(4), "actor": "end_edge"},
+        ]
+    )
+    out = labels_active_at(ivals, points)
+    assert out["actor"].to_list() == ["start_edge"]
+
+
+def test_labels_active_at_drops_points_with_no_match() -> None:
+    ivals = _label_intervals_frame(
+        [
+            {
+                "pull_request_id": 1,
+                "label_name": "t-algebra",
+                "start": _dt(1),
+                "end_effective": _dt(2),
+            },
+        ]
+    )
+    points = _points_frame(
+        [
+            {"pull_request_id": 1, "at": _dt(5), "actor": "after"},
+            {"pull_request_id": 2, "at": _dt(1, 12), "actor": "wrong_pr"},
+        ]
+    )
+    out = labels_active_at(ivals, points)
+    assert out.height == 0
+
+
+def test_labels_active_at_isolates_per_pr() -> None:
+    ivals = _label_intervals_frame(
+        [
+            {
+                "pull_request_id": 1,
+                "label_name": "t-algebra",
+                "start": _dt(1),
+                "end_effective": _dt(5),
+            },
+            {
+                "pull_request_id": 2,
+                "label_name": "t-analysis",
+                "start": _dt(1),
+                "end_effective": _dt(5),
+            },
+        ]
+    )
+    points = _points_frame(
+        [
+            {"pull_request_id": 1, "at": _dt(3), "actor": "alice"},
+            {"pull_request_id": 2, "at": _dt(3), "actor": "bob"},
+        ]
+    )
+    out = labels_active_at(ivals, points).sort("actor")
+    assert out["actor"].to_list() == ["alice", "bob"]
+    assert out["label_name"].to_list() == ["t-algebra", "t-analysis"]
 
 
 def test_attribute_returns_empty_when_label_absent() -> None:
