@@ -14,9 +14,10 @@ This file gives coding agents repo-specific guidance for `qb-notebook`.
   - library-style helpers (`qb_notebook.data_io`, `qb_notebook.filters`,
     `qb_notebook.intervals`, `qb_notebook.plotting`)
   - notebook exploration:
-    - `pr_merge_throughput.ipynb`
-    - `pr_open_durations.ipynb`
-    - `queue_windows.ipynb`
+    - Jupyter (`.ipynb`): `pr_merge_throughput`, `pr_open_durations`,
+      `queue_windows`
+    - marimo (`marimo/*.py`): reactive notebooks for the review-analysis
+      themes (see `docs/review-analysis-plan.md`)
   - static plot generation (`qb_notebook/generate_plot_site.py`)
 
 ## Environment and Tooling
@@ -99,6 +100,31 @@ When adding new analyses, prefer going through `load_pr_interval_data` and
 existing helpers before introducing custom IO code. If you need a new table,
 extend `load_pr_interval_data` rather than duplicating the parse-and-cast
 logic in the notebook.
+
+## Marimo Notebooks
+
+Marimo notebooks live in `marimo/` as plain `.py` files (reactive cell DAG,
+no JSON / output state — clean git diffs).
+
+- Author / explore (auto-reloads on save):
+  - `uv run marimo edit marimo/<name>.py`
+- Serve read-only (good for sharing a snapshot):
+  - `uv run marimo run marimo/<name>.py`
+- Sanity-check the cell DAG and style:
+  - `uv run marimo check marimo/<name>.py`
+
+Conventions:
+
+- Every notebook starts with a `sys.path` bootstrap that adds the repo root
+  so `qb_notebook` is importable regardless of the launching cwd, and
+  resolves `data/` against the repo root (not `Path.cwd()`).
+- IO and any reusable transform belongs in `qb_notebook/*` modules, not in
+  the notebook body. The notebook is for layout, UI controls, and plotting.
+- Marimo enforces unique global variable names across cells. Use `_`-prefix
+  for cell-private temporaries (e.g. `_fig`, `_ax`) and reserve unprefixed
+  names for values that should flow into downstream cells.
+- When a plot or table is the cell's "output", leave it as the last
+  expression so marimo renders it; don't bury it in a print.
 
 ## Plot Site Workflow
 
