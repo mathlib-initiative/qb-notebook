@@ -5,8 +5,11 @@ import polars as pl
 from qb_notebook.pr_shape import (
     DEFAULT_FILES_BREAKS,
     DEFAULT_LINES_BREAKS,
+    DEFAULT_PR_TYPES,
     author_cohort,
     bucket_labels,
+    pr_type,
+    pr_type_order,
     size_buckets,
     started_as_draft,
 )
@@ -263,3 +266,99 @@ def test_started_as_draft_no_events_falls_back_to_is_draft() -> None:
     by_id = {r["id"]: r["started_as_draft"] for r in out.iter_rows(named=True)}
     assert by_id[1] is True
     assert by_id[2] is False
+
+
+def _titled_prs(rows: list[tuple[int, str | None]]) -> pl.DataFrame:
+    return pl.DataFrame(
+        [{"id": i, "title": t} for i, t in rows],
+        schema={"id": pl.Int64, "title": pl.String},
+    )
+
+
+def test_pr_type_canonical_prefixes() -> None:
+    out = pr_type(
+        _titled_prs(
+            [
+                (1, "feat: add lemma"),
+                (2, "chore: bump version"),
+                (3, "fix: off-by-one in foo"),
+                (4, "refactor: rename Bar to Baz"),
+                (5, "doc: update README"),
+                (6, "perf: faster simp"),
+                (7, "ci: pin GH Actions"),
+                (8, "style: tidy whitespace"),
+                (9, "test: cover edge case"),
+            ]
+        )
+    )
+    by_id = {r["id"]: r["pr_type"] for r in out.iter_rows(named=True)}
+    assert by_id == {
+        1: "feat",
+        2: "chore",
+        3: "fix",
+        4: "refactor",
+        5: "doc",
+        6: "perf",
+        7: "ci",
+        8: "style",
+        9: "test",
+    }
+
+
+def test_pr_type_strips_bors_prefix_and_scope() -> None:
+    out = pr_type(
+        _titled_prs(
+            [
+                (1, "[Merged by Bors] - feat: scope-free"),
+                (2, "[Merged by Bors] - feat(Algebra/Group): in scope"),
+                (3, "feat(Topology): live"),
+                # Tolerate odd whitespace around the dash and the colon.
+                (4, "[Merged by Bors]  -  chore : deps"),
+            ]
+        )
+    )
+    by_id = {r["id"]: r["pr_type"] for r in out.iter_rows(named=True)}
+    assert by_id == {1: "feat", 2: "feat", 3: "feat", 4: "chore"}
+
+
+def test_pr_type_alias_remap() -> None:
+    out = pr_type(
+        _titled_prs(
+            [
+                (1, "feature: same as feat"),
+                (2, "docs: same as doc"),
+                (3, "Feat: case-insensitive"),
+            ]
+        )
+    )
+    by_id = {r["id"]: r["pr_type"] for r in out.iter_rows(named=True)}
+    assert by_id == {1: "feat", 2: "doc", 3: "feat"}
+
+
+def test_pr_type_other_and_unparsed_buckets() -> None:
+    out = pr_type(
+        _titled_prs(
+            [
+                # Parsed but not canonical -> "other".
+                (1, "experiment: try a thing"),
+                (2, "wip: not ready"),
+                # No conventional prefix -> "unparsed".
+                (3, "Add missing lemma to Mathlib.Foo"),
+                (4, "Just a sentence with no colon prefix"),
+                # Null title -> null pr_type.
+                (5, None),
+            ]
+        )
+    )
+    by_id = {r["id"]: r["pr_type"] for r in out.iter_rows(named=True)}
+    assert by_id[1] == "other"
+    assert by_id[2] == "other"
+    assert by_id[3] == "unparsed"
+    assert by_id[4] == "unparsed"
+    assert by_id[5] is None
+
+
+def test_pr_type_order_helper_matches_canonical() -> None:
+    order = pr_type_order()
+    assert order[: len(DEFAULT_PR_TYPES)] == list(DEFAULT_PR_TYPES)
+    assert order[-2:] == ["other", "unparsed"]

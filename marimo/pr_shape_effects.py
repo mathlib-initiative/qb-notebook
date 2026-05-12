@@ -20,16 +20,20 @@ def _(mo):
 
     Do bigger PRs take disproportionately longer to merge? Do first-time
     contributors wait longer or churn more? Are PRs that open as drafts
-    different? This notebook slices the merge / court-exit metrics from
-    Themes 1-4 along three axes of the PR itself:
+    different? Does `feat:` move at a different tempo than `chore:` or
+    `refactor:`? This notebook slices the merge / court-exit metrics
+    from Themes 1-4 along four axes of the PR itself:
 
     - **size**: `additions + deletions` and `changed_files_count` bucketed,
     - **author cohort**: first-PR (this author's earliest in the dataset)
       vs returning, plus author's PR-sequence number,
     - **draft history**: did the PR open as draft, or non-draft?
+    - **type**: conventional-commit prefix on the title
+      (`feat:`, `chore:`, `fix:`, `refactor:`, `doc:`, `perf:`, `ci:`,
+      `style:`, `test:`, plus `other` / `unparsed` buckets).
 
     All cuts share the same per-PR row built up in the *cohort* cell, so
-    the four sections are directly comparable.
+    the five sections are directly comparable.
     """)
     return
 
@@ -54,8 +58,10 @@ def _():
     from qb_notebook.pr_shape import (
         DEFAULT_FILES_BREAKS,
         DEFAULT_LINES_BREAKS,
+        DEFAULT_PR_TYPES,
         author_cohort,
         bucket_labels,
+        pr_type,
         size_buckets,
         started_as_draft,
     )
@@ -67,6 +73,7 @@ def _():
     return (
         DEFAULT_FILES_BREAKS,
         DEFAULT_LINES_BREAKS,
+        DEFAULT_PR_TYPES,
         Path,
         attribute_label_events,
         author_cohort,
@@ -78,6 +85,7 @@ def _():
         np,
         pl,
         plt,
+        pr_type,
         reviewers_court_intervals,
         size_buckets,
         started_as_draft,
@@ -97,20 +105,22 @@ def _(Path, datetime, load_pr_interval_data, timezone):
 
 
 @app.cell
-def _(author_cohort, events, prs_raw, size_buckets, started_as_draft):
-    """Per-PR shape attributes: size buckets, author cohort, draft history.
+def _(author_cohort, events, pr_type, prs_raw, size_buckets, started_as_draft):
+    """Per-PR shape attributes: size buckets, author cohort, draft history, type.
 
     `prs` is the prs frame plus columns:
       - `lines_changed`, `lines_bucket`, `files_bucket`
       - `author_first_pr_at`, `author_pr_seq`, `is_first_pr`
       - `started_as_draft`
+      - `pr_type` (conventional-commit prefix bucketed into 9 canonical
+        types + `other` + `unparsed`)
 
     "First-time" is relative to the dataset as a whole (full prs table,
     not filtered to merged). Reasonable since the snapshot covers the
     project lifetime; new authors who later return show up as
     `is_first_pr=False` on subsequent PRs.
     """
-    prs = started_as_draft(author_cohort(size_buckets(prs_raw)), events)
+    prs = pr_type(started_as_draft(author_cohort(size_buckets(prs_raw)), events))
     return (prs,)
 
 
@@ -728,6 +738,206 @@ def _(merged_prs, pl):
         .sort("started_as_draft", descending=True)
     )
     ttm_by_draft
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 5. PR type (title prefix)
+
+    Conventional-commit-style prefix on the PR title, after stripping
+    the `[Merged by Bors] - ` that bors adds at merge. Empirical
+    distribution (current artifact): `feat` ~52 %, `chore` ~31 %, then
+    a long tail of `refactor` / `fix` / `doc` / `perf` / `ci` / `style` /
+    `test` plus `other` (parsed but non-canonical like `experiment`
+    or `wip`) and `unparsed` (free-form titles, ~3.5 %).
+
+    The natural questions: do `chore:` PRs (often deps bumps, file
+    moves, port chores) merge faster than `feat:` PRs of similar size?
+    Does `fix:` get reviewed at a higher rate than `feat:`? Are the
+    `unparsed` PRs systematically slower (i.e. is following the
+    convention a useful signal of intentful authorship)?
+    """)
+    return
+
+
+@app.cell
+def _(DEFAULT_PR_TYPES):
+    """Canonical display order used by every cell in this section so
+    tables and plots line up the same way."""
+    pr_type_order_list = list(DEFAULT_PR_TYPES) + ["other", "unparsed"]
+    return (pr_type_order_list,)
+
+
+@app.cell
+def _(pl, pr_type_order_list, prs):
+    """Per-type cohort sizes by state across the full prs frame."""
+    type_funnel = (
+        prs.group_by("pr_type")
+        .agg(
+            [
+                pl.len().alias("n"),
+                (pl.col("state") == "open").sum().alias("open"),
+                (pl.col("state") == "closed").sum().alias("closed"),
+                (pl.col("state") == "merged").sum().alias("merged_gh_ui"),
+            ]
+        )
+        .with_columns(pl.col("pr_type").cast(pl.Enum(pr_type_order_list)).alias("_o"))
+        .sort("_o")
+        .drop("_o")
+    )
+    type_funnel
+    return
+
+
+@app.cell
+def _(events, expr_merged_to_master, pl, pr_type_order_list, prs):
+    """Merge-rate and reviewed-rate by PR type.
+
+    "Reviewed" = received at least one `LABELED(maintainer-merge)` event
+    (same definition as Sections 2 and 4).
+    """
+    _mm_prs = (
+        events.filter(
+            (pl.col("type") == "LABELED") & (pl.col("label_name") == "maintainer-merge")
+        )
+        .select("pull_request_id")
+        .unique()
+    )
+    type_rates = (
+        prs.with_columns(
+            [
+                expr_merged_to_master().alias("_merged"),
+                ((pl.col("state") == "closed") & ~expr_merged_to_master()).alias(
+                    "_abandoned"
+                ),
+                pl.col("id").is_in(_mm_prs["pull_request_id"]).alias("_reviewed"),
+            ]
+        )
+        .group_by("pr_type")
+        .agg(
+            [
+                pl.len().alias("n"),
+                pl.col("_merged").sum().alias("merged"),
+                pl.col("_abandoned").sum().alias("abandoned"),
+                pl.col("_reviewed").sum().alias("reviewed"),
+            ]
+        )
+        .with_columns(
+            [
+                (pl.col("merged") / pl.col("n")).alias("merged_rate"),
+                (pl.col("abandoned") / pl.col("n")).alias("abandoned_rate"),
+                (pl.col("reviewed") / pl.col("n")).alias("reviewed_rate"),
+            ]
+        )
+        .with_columns(pl.col("pr_type").cast(pl.Enum(pr_type_order_list)).alias("_o"))
+        .sort("_o")
+        .drop("_o")
+    )
+    type_rates
+    return (type_rates,)
+
+
+@app.cell
+def _(np, plt, type_rates):
+    """Grouped-bar chart of merged / reviewed / abandoned rates by PR type.
+    Types with `n < 50` are still shown but flagged via the n-label above
+    each cluster — useful for spotting which buckets the rate is noisy in."""
+    _rows = list(type_rates.iter_rows(named=True))
+    _labels = [r["pr_type"] for r in _rows]
+    _metrics = ["merged_rate", "reviewed_rate", "abandoned_rate"]
+    _colors = ["#4c9", "#39c", "#c63"]
+    _x = np.arange(len(_labels))
+    _w = 0.25
+    _fig, _ax = plt.subplots(figsize=(11, 4.5))
+    for _i, (_m, _c) in enumerate(zip(_metrics, _colors)):
+        _vals = [r[_m] for r in _rows]
+        _ax.bar(_x + (_i - 1) * _w, _vals, _w, label=_m.replace("_rate", ""), color=_c)
+    _ax.set_xticks(_x, _labels, rotation=30, ha="right")
+    _ax.set_ylim(0, 1)
+    _ax.set_ylabel("Share of cohort")
+    _ax.set_title("Outcome rates by PR type")
+    _ax.legend(loc="upper right")
+    _ax.grid(axis="y", alpha=0.3)
+    for _i, _r in enumerate(_rows):
+        _ax.text(
+            _i,
+            1.02,
+            f"n={_r['n']:,}",
+            ha="center",
+            fontsize=8,
+            transform=_ax.get_xaxis_transform(),
+        )
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _(merged_prs, pl, pr_type_order_list):
+    """Per-type TTM percentiles (merged-to-master only)."""
+    ttm_by_type = (
+        merged_prs.group_by("pr_type")
+        .agg(
+            [
+                pl.len().alias("n"),
+                pl.col("ttm_days").median().alias("median_d"),
+                pl.col("ttm_days").quantile(0.75).alias("p75_d"),
+                pl.col("ttm_days").quantile(0.9).alias("p90_d"),
+            ]
+        )
+        .with_columns(pl.col("pr_type").cast(pl.Enum(pr_type_order_list)).alias("_o"))
+        .sort("_o")
+        .drop("_o")
+    )
+    ttm_by_type
+    return
+
+
+@app.cell
+def _(merged_prs, pl, plt, pr_type_order_list):
+    """TTM box plot by PR type. Clipped to <=60d for readability; the
+    table above carries the unclipped percentiles."""
+    _data = [
+        merged_prs.filter(pl.col("pr_type") == _t)["ttm_days"].to_numpy()
+        for _t in pr_type_order_list
+    ]
+    _fig, _ax = plt.subplots(figsize=(11, 4.5))
+    _ax.boxplot(
+        [_d[_d <= 60] for _d in _data],
+        tick_labels=pr_type_order_list,
+        showfliers=False,
+        widths=0.6,
+    )
+    _ax.set_ylabel("Time to merge (days, ≤60d shown)")
+    _ax.set_xlabel("PR type")
+    _ax.set_title("TTM by PR type")
+    plt.setp(_ax.get_xticklabels(), rotation=30, ha="right")
+    _ax.grid(axis="y", alpha=0.3)
+    _ns = [len(_d) for _d in _data]
+    for _i, _n in enumerate(_ns):
+        _ax.text(_i + 1, _ax.get_ylim()[1] * 0.95, f"n={_n}", ha="center", fontsize=8)
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _(merged_prs, pl, pr_type_order_list):
+    """Type × lines-bucket cross-tab on merged PRs. Useful sanity check:
+    `chore` skews small and `refactor`/`feat` skew larger, so per-type
+    TTM differences should be partly explained by size mix."""
+    type_size_mix = (
+        merged_prs.group_by(["pr_type", "lines_bucket"])
+        .agg(pl.len().alias("n"))
+        .pivot(on="lines_bucket", index="pr_type", values="n")
+        .fill_null(0)
+        .with_columns(pl.col("pr_type").cast(pl.Enum(pr_type_order_list)).alias("_o"))
+        .sort("_o")
+        .drop("_o")
+    )
+    type_size_mix
     return
 
 

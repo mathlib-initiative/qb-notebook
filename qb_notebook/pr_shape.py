@@ -1,21 +1,22 @@
-"""PR-shape attributes: size buckets, author cohort, draft history.
+"""PR-shape attributes: size buckets, author cohort, draft history, PR type.
 
-These three helpers underpin Theme 5 (`marimo/pr_shape_effects.py`):
+These helpers underpin Theme 5 (`marimo/pr_shape_effects.py`):
 do bigger PRs take disproportionately longer, do first-time contributors
-wait longer, do PRs that start as drafts behave differently? Each
-function adds attribute columns to a copy of the input PR frame; the
-notebook joins them onto merge / court-exit metrics computed via the
-existing `qb_notebook.review_states` helpers.
+wait longer, do PRs that start as drafts behave differently, do
+`feat:` PRs move at a different tempo than `chore:` or `refactor:`?
+Each function adds attribute columns to a copy of the input PR frame;
+the notebook joins them onto merge / court-exit metrics computed via
+the existing `qb_notebook.review_states` helpers.
 
 The cuts are deliberately keyed off attributes that are stable across
-the PR's life (size at merge, author identity, draft state at open) so
-the same per-PR row can drive multiple sub-analyses without
-recomputation.
+the PR's life (size at merge, author identity, draft state at open,
+title prefix) so the same per-PR row can drive multiple sub-analyses
+without recomputation.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import polars as pl
 
@@ -184,3 +185,97 @@ def started_as_draft(
         )
         .drop("_first_draft_event")
     )
+
+
+# Canonical PR-type prefixes seen on mathlib4 PR titles, in roughly descending
+# order of frequency. `feature` and `docs` are aliased to their canonical forms
+# below so they don't fragment the bucket counts.
+DEFAULT_PR_TYPES: tuple[str, ...] = (
+    "feat",
+    "chore",
+    "refactor",
+    "fix",
+    "doc",
+    "perf",
+    "ci",
+    "style",
+    "test",
+)
+
+# Title prefix bors prepends at merge time. Stripped before parsing the
+# conventional-commit type so `[Merged by Bors] - feat: ...` is recognized
+# as a `feat`. Mirrors `qb_notebook.filters._BORS_TITLE_PREFIX_REGEX`.
+_BORS_PREFIX_PATTERN = r"^\[Merged by Bors\]\s*-\s*"
+
+# Conventional-commit-style prefix: an identifier (optionally with a
+# parenthesized scope) followed by `:`. Tolerates whitespace around the
+# colon. Match group 1 is the type identifier.
+_CONVENTIONAL_TYPE_PATTERN = r"^([A-Za-z][A-Za-z0-9_-]*)(?:\([^)]*\))?\s*:\s*"
+
+DEFAULT_PR_TYPE_ALIASES: Mapping[str, str] = {
+    "feature": "feat",
+    "docs": "doc",
+}
+
+
+def pr_type(
+    df_prs: pl.DataFrame,
+    *,
+    title_col: str = "title",
+    canonical: Sequence[str] = DEFAULT_PR_TYPES,
+    aliases: Mapping[str, str] = DEFAULT_PR_TYPE_ALIASES,
+    unparsed_label: str = "unparsed",
+    other_label: str = "other",
+) -> pl.DataFrame:
+    """Add `pr_type` (string) parsed from the PR title's conventional prefix.
+
+    The bors `[Merged by Bors] - ` prefix is stripped first so merged PRs
+    classify the same as their pre-merge form. Then a conventional-commit
+    prefix `type:` or `type(scope):` is extracted, lowercased, and remapped
+    via `aliases` (default `feature` -> `feat`, `docs` -> `doc`).
+
+    Bucketing:
+
+    - parsed prefix in `canonical` (after alias remap) -> the canonical
+      name (e.g. `"feat"`, `"chore"`).
+    - parsed prefix not in `canonical` -> `other_label` (default
+      `"other"`). Catches one-offs like `experiment:`, `wip:`, `bench:`.
+    - no parseable prefix -> `unparsed_label` (default `"unparsed"`).
+      Catches free-form titles that don't follow the convention.
+
+    Null titles get null `pr_type`. The output column is a regular string;
+    cast to `pl.Enum(list(canonical) + [other_label, unparsed_label])`
+    in the caller if a fixed plot ordering is needed.
+    """
+    canonical_list = list(canonical)
+    # Build the alias-remap as a chained when/then so we don't need to
+    # materialize a join table for a handful of fix-ups.
+    parsed = (
+        pl.col(title_col)
+        .str.replace(_BORS_PREFIX_PATTERN, "", literal=False)
+        .str.extract(_CONVENTIONAL_TYPE_PATTERN, group_index=1)
+        .str.to_lowercase()
+    )
+    aliased: pl.Expr = parsed
+    for src, dst in aliases.items():
+        aliased = pl.when(aliased == src).then(pl.lit(dst)).otherwise(aliased)
+    bucketed = (
+        pl.when(pl.col(title_col).is_null())
+        .then(pl.lit(None, dtype=pl.String))
+        .when(aliased.is_null())
+        .then(pl.lit(unparsed_label))
+        .when(aliased.is_in(canonical_list))
+        .then(aliased)
+        .otherwise(pl.lit(other_label))
+    )
+    return df_prs.with_columns(bucketed.alias("pr_type"))
+
+
+def pr_type_order(
+    *,
+    canonical: Sequence[str] = DEFAULT_PR_TYPES,
+    other_label: str = "other",
+    unparsed_label: str = "unparsed",
+) -> list[str]:
+    """Canonical display order for `pr_type` plot axes / Enum casts."""
+    return list(canonical) + [other_label, unparsed_label]

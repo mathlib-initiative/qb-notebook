@@ -376,8 +376,14 @@ a single `prs`-shaped frame via three helpers in `qb_notebook/pr_shape.py`:
   `READY_FOR_REVIEW`/`CONVERT_TO_DRAFT` event determines initial state;
   PRs with no draft events fall back to the current `prs.is_draft`
   snapshot to catch drafts that never marked ready.
+- `pr_type(df_prs)` — conventional-commit prefix on the title
+  (`feat:`, `chore:`, `fix:`, `refactor:`, `doc:`, `perf:`, `ci:`,
+  `style:`, `test:`), bucketed into 9 canonical types + `other`
+  (parsed but non-canonical, e.g. `experiment:`/`wip:`) + `unparsed`
+  (no prefix). The bors `[Merged by Bors] -` prefix is stripped first;
+  `feature` aliases to `feat`, `docs` to `doc`.
 
-All four sub-analyses share the same per-PR row so cuts are directly
+All five sub-analyses share the same per-PR row so cuts are directly
 comparable.
 
 **Plots / metrics**:
@@ -403,6 +409,15 @@ comparable.
   `started_as_draft`. Empirical: started-as-draft merge-rate 48 %
   (vs 83 % non-draft), median TTM 6.2d (vs 1.7d), p90 67d (vs 31d).
   Drafts are dramatically slower and less likely to merge.
+- PR type: per-type cohort sizes, outcome rates (merged / reviewed /
+  abandoned), TTM percentile table + box plot, plus a type × lines
+  bucket cross-tab so per-type latency differences can be sanity-
+  checked against size mix. Empirical on the current artifact:
+  `chore:` PRs merge in 0.66d median vs `feat:` 4.32d (~6.5×); `feat:`
+  has highest absolute volume (n=20k) and dominates the long tail.
+  `unparsed` PRs merge at 44 % vs `feat` 81 % / `chore` 87 % / `doc`
+  93 % — following the convention is a strong signal of intentful
+  authorship.
 
 **Data**: `prs`, `events`, `queue_windows` (ruleset 3 via
 `reviewers_court_intervals`). Team-membership YAML not consumed in this
@@ -436,8 +451,18 @@ Session 6).
 - The `WIP` label start was in the original Theme 5 plan but is not
   broken out separately here — `WIP` is a mathlib4-specific workflow
   signal rather than a GitHub state and overlaps heavily with draft
-  in practice. Adding a third draft-history category that distinguishes
-  draft vs WIP vs both would be a follow-up.
+  in practice. PRs titled `wip:` land in the `other` PR-type bucket
+  and read with much lower merge / reviewed rates than canonical
+  types, which captures a chunk of the signal cheaply; a dedicated
+  `had_wip_label_at_open` cut alongside `started_as_draft` would
+  still be a worthwhile follow-up.
+- The PR-type prefix is parsed from the title only, after stripping
+  the bors `[Merged by Bors] -` rewrite. A handful of `(scope)`
+  forms are tolerated (`feat(Algebra/X): ...`); titles that don't
+  match the conventional pattern land in `unparsed` rather than
+  guessing. The `test:` bucket is tiny (~130 PRs, ~4 % merge-rate)
+  and dominated by experimental / WIP titles that happen to start
+  with the word "test"; treat its summary stats with caution.
 
 ---
 
@@ -493,10 +518,13 @@ These keep showing up in multiple themes and should be implemented once:
   `files_bucket`; `author_cohort(df_prs)` adds `author_first_pr_at` /
   `author_pr_seq` / `is_first_pr`; `started_as_draft(df_prs, df_events)`
   adds `started_as_draft` from `READY_FOR_REVIEW`/`CONVERT_TO_DRAFT`
-  events with `is_draft` snapshot fallback. `bucket_labels(breaks)`
-  exposes the canonical label ordering for plot axes. Used by Theme 5;
-  ready for plot-site polish (Session 6) wherever shape cuts come up.
-  ✅ shipped.
+  events with `is_draft` snapshot fallback; `pr_type(df_prs)` adds
+  `pr_type` from the title's conventional-commit prefix (bors prefix
+  stripped, `feature`/`docs` aliased, non-canonical → `other`, no
+  prefix → `unparsed`). `bucket_labels(breaks)` exposes size-axis
+  ordering and `pr_type_order()` exposes type-axis ordering for plots.
+  Used by Theme 5; ready for plot-site polish (Session 6) wherever
+  shape cuts come up. ✅ shipped.
 
 A nice-to-have upstream change: an explicit `queueboard-core`
 ruleset preserving the original `awaiting-review` semantics, so the
