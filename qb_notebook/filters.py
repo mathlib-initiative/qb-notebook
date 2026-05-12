@@ -63,6 +63,56 @@ def expr_title_exclude_any(
     )
 
 
+# Title prefix bors uses when it rewrites a PR title at merge time.
+# The trailing ` -` and the case-insensitive match both come from the
+# convention used in `generate_plot_site.py` and the Jupyter notebooks.
+_BORS_TITLE_PREFIX_REGEX = r"^\[Merged by Bors\] -"
+
+
+def expr_merged_to_master(
+    *,
+    base_branch: str = "master",
+    title_col: str = "title",
+    base_branch_col: str = "base_ref_name",
+    state_col: str = "state",
+) -> pl.Expr:
+    """Bors-aware "this PR was merged to master" predicate.
+
+    Mathlib4 PRs land via `bors`, which closes the PR (so `state == 'closed'`
+    and GitHub's `merged_at` is null) instead of using GitHub's native merge.
+    Bors marks a successful merge by rewriting the title to
+    ``[Merged by Bors] - …``.
+
+    Bors also incidentally closes PRs when it deletes other PRs' target
+    branches (e.g. `bump/v4.*` cleanup); those closures do not get the title
+    rewrite and must not be counted as merges. Constraining to
+    ``base_ref_name == base_branch`` filters them out by construction.
+
+    The predicate also picks up the small minority of master-targeting PRs
+    that were merged through GitHub's UI rather than bors (these have
+    ``state == 'merged'`` and a populated ``merged_at``).
+    """
+    return (pl.col(base_branch_col) == base_branch) & (
+        expr_title_regex(_BORS_TITLE_PREFIX_REGEX, title_col=title_col)
+        | (pl.col(state_col) == "merged")
+    )
+
+
+def expr_merged_at_effective(
+    *,
+    merged_at_col: str = "merged_at",
+    closed_at_col: str = "closed_at",
+) -> pl.Expr:
+    """Best available merge timestamp.
+
+    Falls back to ``closed_at`` for bors-merged PRs (where GitHub's
+    ``merged_at`` is null). Only meaningful for rows that already satisfy
+    :func:`expr_merged_to_master` — for non-merged rows this still returns
+    ``closed_at`` if present, which is not a merge time.
+    """
+    return pl.coalesce([pl.col(merged_at_col), pl.col(closed_at_col)])
+
+
 def expr_repo_in(repo_ids: list[int], *, repo_col: str = "repository_id") -> pl.Expr:
     return pl.col(repo_col).is_in(repo_ids)
 
