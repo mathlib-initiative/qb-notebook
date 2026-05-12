@@ -31,27 +31,33 @@ buildable in its own session.
 
 ## Data caveats
 
-1. `syncer_prtimelineevent.type` does **not** include
-   `REVIEWED` / `APPROVED` / `CHANGES_REQUESTED` events. Available types are
-   `ASSIGNED`, `CLOSED`, `CONVERT_TO_DRAFT`, `HEAD_FORCE_PUSHED`, `LABELED`,
-   `READY_FOR_REVIEW`, `REOPENED`, `UNASSIGNED`, `UNLABELED`. **Mathlib's
-   review handoff is encoded as labels**, so this is fine — `LABELED` /
-   `UNLABELED` rows with `label_name` + `actor_login` give us the
-   review state machine.
-2. `syncer_pullrequest.approvals` carries the GitHub-native approving
-   reviewers (independent of the `maintainer-merge` label workflow). Useful
-   as a secondary signal.
-3. Snapshot tables (queue/area/reviewer-assignment) are not exported.
-4. Bors itself shows up as an actor on merges via the
-   `[Merged by Bors]` title prefix and the `CLOSED` / merged-at columns;
-   the human who triggered bors is not directly recorded in the timeline.
-   Proxy: actor on the last `ready-to-merge` LABELED event, or commenter
-   that issued `bors merge`/`bors r+` (would require comment-body data we
-   don't currently export).
-5. Team-membership YAML from the leanprover-community website is required
-   to split metrics by *reviewer team* vs *maintainer team* vs *other
-   contributors*. Without it, we have to use observed-behavior proxies
-   (e.g. "anyone who has ever applied `maintainer-merge`").
+1. `syncer_prtimelineevent.type` covers `LABELED` / `UNLABELED` / `CLOSED`
+   / `READY_FOR_REVIEW` / `REOPENED` / `ASSIGNED` / `UNASSIGNED` /
+   `CONVERT_TO_DRAFT` / `HEAD_FORCE_PUSHED` plus, since queueboard-core
+   #164 (2026-05), `ISSUE_COMMENTED`, `REVIEW_APPROVED`,
+   `REVIEW_COMMENTED`, `REVIEW_CHANGES_REQUESTED`, `REVIEW_DISMISSED`,
+   `REVIEW_REQUESTED`, and `REVIEW_REQUEST_REMOVED`. Comment **bodies**
+   are not exported, only event metadata + actor + timestamps.
+2. `syncer_prreviewinlinecomment.parquet` is also exported (FK to the
+   parent `PullRequestReview` event), but again without comment bodies.
+3. `syncer_pullrequest.approvals` carries the GitHub-native approving
+   reviewers (independent of the `maintainer-merge` label workflow).
+   Useful as a secondary signal; ~52 % coverage on maintainer-merged PRs.
+4. Snapshot tables (queue/area/reviewer-assignment) are not exported.
+5. **Bot-applied labels need attribution.** `maintainer-merge` and
+   `ready-to-merge` are added by bots (`github-actions`,
+   `leanprover-community-mathlib4-bot`, `mathlib-triage`) in response to
+   human comments (`maintainer merge`, `bors r+`, etc.). Use
+   `qb_notebook.review_states.attribute_label_events` to credit the
+   human who triggered each label: it picks the most recent non-bot
+   `ISSUE_COMMENTED` / `REVIEW_*` event on the same PR within a
+   configurable window (default 10 min). Empirical coverage with the
+   new TimelineEvent ingest: **>99 % for `maintainer-merge`**, **~98 %
+   for `ready-to-merge`** in mathlib4. The residual ~1–2 % are mostly
+   labels applied long after the trigger comment (e.g. waiting on CI).
+6. Team-membership YAML from the leanprover-community website is
+   required to split metrics by *reviewer team* vs *maintainer team* vs
+   *other contributors*. See `qb_notebook.teams`.
 
 ## Key mathlib labels (workflow state machine)
 
@@ -107,51 +113,61 @@ reusable). Add 2–3 plots to the plot site.
 
 ### Theme 2 — Reviewer & maintainer load
 
-**Status: shipped (`marimo/reviewer_load.py`, `qb_notebook/teams.py`).**
+**Status: shipped (`marimo/reviewer_load.py`, `qb_notebook/teams.py`,
+`qb_notebook.review_states.attribute_label_events`).**
 
 **Question**: Who is doing the review work, how concentrated is it, and is
 the active-reviewer pool growing or shrinking?
 
+**Attribution model**: `maintainer-merge` and `ready-to-merge` are
+bot-applied. We attribute each `LABELED` event back to the human who
+triggered it via `attribute_label_events`: the most recent non-bot
+`ISSUE_COMMENTED` / `REVIEW_*` event on the same PR within a configurable
+window (default 10 min). Coverage is ~99 % for `maintainer-merge` and
+~98 % for `ready-to-merge`; the unattributed remainder shows up in a
+coverage cell up front.
+
 **Plots / metrics**:
 
-- Maintainer-merge actor counts per reviewer per month (top-N table, plus
-  long-tail histogram).
-- **Active reviewer count per week**: number of distinct `actor_login`
-  values on `LABELED(maintainer-merge)` events in a rolling 7-day or
-  28-day window. Trend line over project history.
-- **Concentration**: Lorenz curve + Gini coefficient of `maintainer-merge`
-  applications by reviewer, computed yearly.
-- **Bus factor**: smallest N reviewers covering 50 % / 80 % of
-  `maintainer-merge` events, plotted over time.
-- Bors-trigger proxy: actor on `ready-to-merge` LABELED events — counts
-  per maintainer, and overlap with reviewer-team list.
-- Per-reviewer: median time from PR's first `awaiting-review` to their
-  `maintainer-merge` label (only counting PRs they signed off).
-- Reviewer "fan-out": for each author, how many distinct reviewers have
-  signed off their PRs?
+- Attribution coverage cell + trigger→label gap histogram.
+- Top-N reviewers + long-tail histogram (per-reviewer counts table
+  annotated with team membership).
+- **Active reviewer count per week**: distinct attributed reviewers in
+  a trailing rolling window. Trend over project history.
+- **Concentration**: Lorenz curve + Gini coefficient per year on
+  attributed triggers.
+- **Bus factor**: smallest N reviewers covering 50 % / 80 % per year.
+- **Bors-trigger attribution**: same heuristic applied to
+  `ready-to-merge`. Top maintainers by inferred bors triggers, with
+  coverage against the team-membership snapshot.
 
-**Data**: `events` (LABELED only, filtered to relevant label names),
-`label_defs`, `core_user`, team-membership YAML.
+**Data**: `events` (LABELED + ISSUE_COMMENTED + REVIEW_*), team-membership
+YAML.
 
-**Output**: `reviewer_load.ipynb` + helpers in
-`qb_notebook/reviewer_metrics.py`. Several plot-site additions.
+**Output**: `marimo/reviewer_load.py`,
+`qb_notebook.review_states.attribute_label_events` (reused by future
+themes that need to credit bot-applied labels).
 
 **Open questions**:
 - ~~Multiple `maintainer-merge` applications to the same PR (after a
-  force-push) — count each, or count first only?~~ Resolved: notebook
-  computes **both** ("per application" and "first per PR") side-by-side
-  so the gap surfaces re-sign-off load explicitly.
+  force-push) — count each, or count first only?~~ Resolved: each
+  attributed event counts as one trigger, since the heuristic identifies
+  one human per `LABELED` event independently.
 - How to anonymize/aggregate when showing per-person plots publicly?
+- Could we increase coverage of the residual 1–2 % via comment-body
+  parsing? Would require exporting body text from the syncer.
 
 **Notes from implementation**:
 - `qb_notebook/teams.py` reads `data/people.yaml` + `data/teams.yaml`
   directly from a sibling `leanprover-community.github.io` checkout;
   there is also a `python -m qb_notebook.teams` CLI for dumping a JSON
   snapshot. Logins are lowercased before set ops.
-- The `maintainer-merge` label only entered use around mid-2024, so
-  the active-reviewer rolling chart spans ~2 years and yearly Lorenz
-  starts at 2024. `ready-to-merge` LABELED events go back to 2021 and
-  are richer for the bors-trigger overlay.
+- The `maintainer-merge` label only entered use around mid-2024, so the
+  active-reviewer rolling chart spans ~2 years. `ready-to-merge`
+  triggers go back to 2021 and are richer for the bors overlay.
+- The earlier version of this theme used `actor_login` on the LABELED
+  event directly — which is the bot, not the reviewer. That version was
+  scrapped after the upstream TimelineEvent expansion landed.
 
 ---
 

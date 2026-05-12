@@ -1,8 +1,12 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import polars as pl
 
-from qb_notebook.review_states import label_intervals, stage_timestamps
+from qb_notebook.review_states import (
+    attribute_label_events,
+    label_intervals,
+    stage_timestamps,
+)
 
 
 def _events(rows: list[dict]) -> pl.DataFrame:
@@ -297,3 +301,238 @@ def test_stage_timestamps_first_application_only() -> None:
     assert row["first_awaiting_review"] == _dt(2)
     assert row["first_maintainer_merge"] == _dt(6)
     assert row["first_ready_to_merge"] is None
+
+
+# ---- attribute_label_events ------------------------------------------------
+
+
+def _ts(*, mins: int = 0, secs: int = 0) -> datetime:
+    return datetime(2025, 6, 1, 12, 0, 0, tzinfo=timezone.utc) + timedelta(
+        minutes=mins, seconds=secs
+    )
+
+
+def test_attribute_picks_most_recent_human_within_window() -> None:
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _ts(mins=0),
+                "type": "ISSUE_COMMENTED",
+                "label_name": None,
+                "actor_login": "alice",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _ts(mins=2),
+                "type": "ISSUE_COMMENTED",
+                "label_name": None,
+                "actor_login": "bob",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _ts(mins=3),
+                "type": "LABELED",
+                "label_name": "maintainer-merge",
+                "actor_login": "github-actions",
+            },
+        ]
+    )
+    out = attribute_label_events(ev, "maintainer-merge", window_seconds=600)
+    assert out.height == 1
+    row = out.row(0, named=True)
+    assert row["inferred_actor"] == "bob"
+    assert row["trigger_event_type"] == "ISSUE_COMMENTED"
+    assert row["gap_seconds"] == 60
+    assert row["attributed"] is True
+
+
+def test_attribute_returns_null_when_no_event_in_window() -> None:
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _ts(mins=0),
+                "type": "ISSUE_COMMENTED",
+                "label_name": None,
+                "actor_login": "alice",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _ts(mins=30),
+                "type": "LABELED",
+                "label_name": "maintainer-merge",
+                "actor_login": "github-actions",
+            },
+        ]
+    )
+    out = attribute_label_events(ev, "maintainer-merge", window_seconds=600)
+    assert out.height == 1
+    row = out.row(0, named=True)
+    assert row["inferred_actor"] is None
+    assert row["attributed"] is False
+
+
+def test_attribute_skips_bot_actors() -> None:
+    """A bot comment just before the label shouldn't be credited."""
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _ts(mins=0),
+                "type": "ISSUE_COMMENTED",
+                "label_name": None,
+                "actor_login": "alice",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _ts(mins=2),
+                "type": "ISSUE_COMMENTED",
+                "label_name": None,
+                "actor_login": "github-actions",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _ts(mins=3),
+                "type": "LABELED",
+                "label_name": "maintainer-merge",
+                "actor_login": "github-actions",
+            },
+        ]
+    )
+    out = attribute_label_events(ev, "maintainer-merge", window_seconds=600)
+    row = out.row(0, named=True)
+    assert row["inferred_actor"] == "alice"
+
+
+def test_attribute_does_not_pick_future_events() -> None:
+    """Events after the label shouldn't be considered triggers."""
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _ts(mins=0),
+                "type": "LABELED",
+                "label_name": "maintainer-merge",
+                "actor_login": "github-actions",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _ts(mins=2),
+                "type": "ISSUE_COMMENTED",
+                "label_name": None,
+                "actor_login": "alice",
+            },
+        ]
+    )
+    out = attribute_label_events(ev, "maintainer-merge", window_seconds=600)
+    row = out.row(0, named=True)
+    assert row["inferred_actor"] is None
+
+
+def test_attribute_isolates_per_pr() -> None:
+    """A comment on PR 2 shouldn't attribute a label on PR 1."""
+    ev = _events(
+        [
+            {
+                "pull_request_id": 2,
+                "occurred_at": _ts(mins=0),
+                "type": "ISSUE_COMMENTED",
+                "label_name": None,
+                "actor_login": "alice",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _ts(mins=1),
+                "type": "LABELED",
+                "label_name": "maintainer-merge",
+                "actor_login": "github-actions",
+            },
+        ]
+    )
+    out = attribute_label_events(ev, "maintainer-merge", window_seconds=600)
+    rows = {r["pull_request_id"]: r for r in out.iter_rows(named=True)}
+    assert rows[1]["inferred_actor"] is None
+
+
+def test_attribute_uses_review_approved_as_trigger() -> None:
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _ts(mins=0),
+                "type": "REVIEW_APPROVED",
+                "label_name": None,
+                "actor_login": "alice",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _ts(mins=1),
+                "type": "LABELED",
+                "label_name": "maintainer-merge",
+                "actor_login": "github-actions",
+            },
+        ]
+    )
+    out = attribute_label_events(ev, "maintainer-merge", window_seconds=600)
+    row = out.row(0, named=True)
+    assert row["inferred_actor"] == "alice"
+    assert row["trigger_event_type"] == "REVIEW_APPROVED"
+
+
+def test_attribute_handles_multiple_label_events_per_pr() -> None:
+    """A PR that gets maintainer-merge twice (e.g. after force-push)
+    should produce two attributions, one per LABELED event."""
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _ts(mins=0),
+                "type": "ISSUE_COMMENTED",
+                "label_name": None,
+                "actor_login": "alice",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _ts(mins=1),
+                "type": "LABELED",
+                "label_name": "maintainer-merge",
+                "actor_login": "github-actions",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _ts(mins=30),
+                "type": "ISSUE_COMMENTED",
+                "label_name": None,
+                "actor_login": "bob",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _ts(mins=31),
+                "type": "LABELED",
+                "label_name": "maintainer-merge",
+                "actor_login": "github-actions",
+            },
+        ]
+    )
+    out = attribute_label_events(ev, "maintainer-merge", window_seconds=600).sort(
+        "label_at"
+    )
+    assert out.height == 2
+    assert out["inferred_actor"].to_list() == ["alice", "bob"]
+
+
+def test_attribute_returns_empty_when_label_absent() -> None:
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _ts(mins=0),
+                "type": "ISSUE_COMMENTED",
+                "label_name": None,
+                "actor_login": "alice",
+            },
+        ]
+    )
+    out = attribute_label_events(ev, "maintainer-merge", window_seconds=600)
+    assert out.height == 0

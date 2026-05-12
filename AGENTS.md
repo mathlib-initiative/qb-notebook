@@ -78,24 +78,34 @@ function).
 `qb_notebook.data_io.load_pr_interval_data(...)` expects these parquet files
 in `data/` and returns a dict with the following keys:
 
-| key               | parquet file                             |
-| ----------------- | ---------------------------------------- |
-| `prs`             | `syncer_pullrequest.parquet`             |
-| `events`          | `syncer_prtimelineevent.parquet`         |
-| `label_defs`      | `syncer_labeldef.parquet`                |
-| `prlabel`         | `syncer_prlabel.parquet`                 |
-| `queue_windows`   | `analyzer_prqueuewindow.parquet`         |
-| `check_runs`      | `syncer_commitcheckrun.parquet`          |
-| `status_contexts` | `syncer_commitstatuscontext.parquet`     |
+| key               | parquet file                                  |
+| ----------------- | --------------------------------------------- |
+| `prs`             | `syncer_pullrequest.parquet`                  |
+| `events`          | `syncer_prtimelineevent.parquet`              |
+| `label_defs`      | `syncer_labeldef.parquet`                     |
+| `prlabel`         | `syncer_prlabel.parquet`                      |
+| `queue_windows`   | `analyzer_prqueuewindow.parquet`              |
+| `check_runs`      | `syncer_commitcheckrun.parquet`               |
+| `status_contexts` | `syncer_commitstatuscontext.parquet`          |
+| `inline_comments` | `syncer_prreviewinlinecomment.parquet`¹       |
+
+¹ Loaded only if present (artifact-dependent). Don't assume the key exists.
+
+The `events` frame includes review-related event types added upstream
+in queueboard-core #164 (2026-05): `ISSUE_COMMENTED`, `REVIEW_APPROVED`,
+`REVIEW_COMMENTED`, `REVIEW_CHANGES_REQUESTED`, `REVIEW_DISMISSED`,
+`REVIEW_REQUESTED`, `REVIEW_REQUEST_REMOVED`, alongside the older
+`LABELED` / `UNLABELED` / `CLOSED` / etc. Comment bodies are **not**
+exported.
 
 The full set of parquet files currently present in `data/` is broader and
 also includes: `analyzer_prdependency`, `analyzer_prdependencystate`,
 `analyzer_prqueuewindowbuildstate`, `analyzer_prrevision`,
 `analyzer_prrevisionbuildstate`, `analyzer_queueruleset`,
 `core_repository`, `core_user`, `syncer_commithistoryharvest`,
-`syncer_repobackfillcursor`. Read these directly with
-`qb_notebook.data_io._read_and_parse` (or `pl.read_parquet` +
-`parse_datetime_columns`) when you need them.
+`syncer_prreviewinlinecommentbackfill`, `syncer_repobackfillcursor`.
+Read these directly with `qb_notebook.data_io._read_and_parse` (or
+`pl.read_parquet` + `parse_datetime_columns`) when you need them.
 
 When adding new analyses, prefer going through `load_pr_interval_data` and
 existing helpers before introducing custom IO code. If you need a new table,

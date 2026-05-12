@@ -106,13 +106,22 @@ def load_pr_interval_data(data_dir: str | Path = "data") -> dict[str, pl.DataFra
     - syncer_commitcheckrun.parquet
     - syncer_commitstatuscontext.parquet
 
+    Optional (loaded if present; omitted from the result dict otherwise):
+    - syncer_prreviewinlinecomment.parquet → key ``inline_comments``
+
     The ``queue_windows`` frame has its FK columns cast from Float64 to Int64
     (nullable integers are exported as float by the Django/parquet pipeline).
+
+    ``events`` includes the post-2026-05 timeline event types
+    (``ISSUE_COMMENTED``, ``REVIEW_APPROVED``, ``REVIEW_COMMENTED``,
+    ``REVIEW_CHANGES_REQUESTED``, ``REVIEW_DISMISSED``,
+    ``REVIEW_REQUESTED``, ``REVIEW_REQUEST_REMOVED``) alongside the older
+    ``LABELED`` / ``UNLABELED`` / ``CLOSED`` / etc.
     """
     root = Path(data_dir)
     qw_raw = _read_and_parse(root / "analyzer_prqueuewindow.parquet")
     qw = _cast_float_to_nullable_int(qw_raw, _QUEUE_WINDOW_FK_COLS)
-    return {
+    out: dict[str, pl.DataFrame] = {
         "prs": _read_and_parse(root / "syncer_pullrequest.parquet"),
         "events": _read_and_parse(root / "syncer_prtimelineevent.parquet"),
         "label_defs": _read_and_parse(root / "syncer_labeldef.parquet"),
@@ -121,6 +130,12 @@ def load_pr_interval_data(data_dir: str | Path = "data") -> dict[str, pl.DataFra
         "check_runs": _read_and_parse(root / "syncer_commitcheckrun.parquet"),
         "status_contexts": _read_and_parse(root / "syncer_commitstatuscontext.parquet"),
     }
+    inline_path = root / "syncer_prreviewinlinecomment.parquet"
+    if inline_path.exists():
+        # gh_created_at is the GitHub-side timestamp; add it to the parse list
+        # for this table only (the default tuple already covers it).
+        out["inline_comments"] = _read_and_parse(inline_path)
+    return out
 
 
 @dataclass
