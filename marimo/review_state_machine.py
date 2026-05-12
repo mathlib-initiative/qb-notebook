@@ -63,6 +63,13 @@ def _():
 
     from qb_notebook.data_io import load_pr_interval_data, merged_prs_frame
     from qb_notebook.filters import expr_is_draft
+    from qb_notebook.pr_shape import (
+        DEFAULT_LINES_BREAKS,
+        DEFAULT_PR_TYPES,
+        bucket_labels,
+        pr_type,
+        size_buckets,
+    )
     from qb_notebook.review_states import (
         MATHLIB_LABEL_RETIRED_AT,
         label_intervals,
@@ -70,8 +77,11 @@ def _():
     )
 
     return (
+        DEFAULT_LINES_BREAKS,
+        DEFAULT_PR_TYPES,
         MATHLIB_LABEL_RETIRED_AT,
         Path,
+        bucket_labels,
         datetime,
         expr_is_draft,
         label_intervals,
@@ -80,6 +90,8 @@ def _():
         np,
         pl,
         plt,
+        pr_type,
+        size_buckets,
         stage_timestamps,
         timezone,
     )
@@ -516,6 +528,223 @@ def _(intervals, pl):
         .sort("duration_days", descending=True)
     )
     stuck
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 6. Sojourn × PR shape (Session 8)
+
+    Per-state sojourn distributions split by PR size and conventional-
+    commit type. Honors the same UI toggles (label selector, merged-only,
+    drafts) as the sections above. Shape attributes come from
+    `qb_notebook.pr_shape` (the same helpers Theme 5 uses) and are joined
+    onto the filtered `intervals` frame so the two views stay in lockstep.
+    """)
+    return
+
+
+@app.cell
+def _(intervals, pl, pr_type, prs, size_buckets):
+    """Decorate the filtered `intervals` frame with per-PR shape attributes.
+
+    `lines_bucket` and `pr_type` are PR-level — they don't vary across
+    intervals on the same PR — so a left-join on `pull_request_id`
+    suffices. Unmatched PRs (e.g. older PRs missing additions/deletions)
+    get null bucket / type.
+    """
+    _shape = pr_type(size_buckets(prs)).select(
+        pl.col("id").alias("pull_request_id"),
+        "lines_bucket",
+        "pr_type",
+    )
+    intervals_shape = intervals.join(_shape, on="pull_request_id", how="left")
+    return (intervals_shape,)
+
+
+@app.cell
+def _(
+    DEFAULT_LINES_BREAKS,
+    bucket_labels,
+    intervals_shape,
+    labels_chosen,
+    pl,
+    plt,
+):
+    """Sojourn boxplot by `lines_bucket`, one panel per state label.
+    Closed intervals only, y-axis clipped at 30d for legibility."""
+    _bucket_order = bucket_labels(DEFAULT_LINES_BREAKS)
+    _closed = intervals_shape.filter(~pl.col("is_open"))
+    _n = max(len(labels_chosen), 1)
+    _fig, _axes = plt.subplots(
+        nrows=_n, sharex=True, figsize=(9, 2.6 * _n), squeeze=False
+    )
+    for _ax, _lbl in zip(_axes.flat, labels_chosen):
+        _data = [
+            _closed.filter(
+                (pl.col("label_name") == _lbl) & (pl.col("lines_bucket") == _b)
+            )["duration_days"].to_numpy()
+            for _b in _bucket_order
+        ]
+        _ax.boxplot(
+            [_d[_d <= 30] for _d in _data],
+            tick_labels=_bucket_order,
+            showfliers=False,
+            widths=0.6,
+        )
+        _ax.set_title(f"{_lbl}")
+        _ax.set_ylabel("days (≤30d)")
+        _ax.grid(axis="y", alpha=0.3)
+        for _i, _d in enumerate(_data):
+            _ax.text(
+                _i + 1,
+                _ax.get_ylim()[1] * 0.92,
+                f"n={len(_d)}",
+                ha="center",
+                fontsize=7,
+            )
+    _axes.flat[-1].set_xlabel("Lines changed bucket")
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _(DEFAULT_LINES_BREAKS, bucket_labels, intervals_shape, mo, pl):
+    """Per-(label, lines_bucket) sojourn summary table — median / p75 / p90
+    plus interval count, ordered by bucket then label."""
+    _bucket_order = bucket_labels(DEFAULT_LINES_BREAKS)
+    sojourn_by_lines = (
+        intervals_shape.filter(
+            ~pl.col("is_open") & pl.col("lines_bucket").is_not_null()
+        )
+        .group_by(["label_name", "lines_bucket"])
+        .agg(
+            [
+                pl.len().alias("n"),
+                pl.col("duration_days").median().alias("median_d"),
+                pl.col("duration_days").quantile(0.75).alias("p75_d"),
+                pl.col("duration_days").quantile(0.90).alias("p90_d"),
+            ]
+        )
+        .with_columns(pl.col("lines_bucket").cast(pl.Enum(_bucket_order)).alias("_o"))
+        .sort(["label_name", "_o"])
+        .drop("_o")
+    )
+    mo.md("### Sojourn quantiles per (state, lines_bucket)")
+    sojourn_by_lines
+    return
+
+
+@app.cell
+def _(DEFAULT_PR_TYPES, intervals_shape, labels_chosen, pl, plt):
+    """Sojourn boxplot by `pr_type`, one panel per state label.
+
+    Restricted to the 9 canonical conventional-commit types — `other` and
+    `unparsed` are dropped to keep the axis legible. Same y-clip as the
+    size view."""
+    _types = list(DEFAULT_PR_TYPES)
+    _closed = intervals_shape.filter(~pl.col("is_open"))
+    _n = max(len(labels_chosen), 1)
+    _fig, _axes = plt.subplots(
+        nrows=_n, sharex=True, figsize=(10, 2.6 * _n), squeeze=False
+    )
+    for _ax, _lbl in zip(_axes.flat, labels_chosen):
+        _data = [
+            _closed.filter((pl.col("label_name") == _lbl) & (pl.col("pr_type") == _t))[
+                "duration_days"
+            ].to_numpy()
+            for _t in _types
+        ]
+        _ax.boxplot(
+            [_d[_d <= 30] for _d in _data],
+            tick_labels=_types,
+            showfliers=False,
+            widths=0.6,
+        )
+        _ax.set_title(f"{_lbl}")
+        _ax.set_ylabel("days (≤30d)")
+        _ax.grid(axis="y", alpha=0.3)
+        for _i, _d in enumerate(_data):
+            _ax.text(
+                _i + 1,
+                _ax.get_ylim()[1] * 0.92,
+                f"n={len(_d)}",
+                ha="center",
+                fontsize=7,
+            )
+    _axes.flat[-1].set_xlabel("PR type (conventional-commit prefix)")
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 7. Ping-pong × PR shape (Session 8)
+
+    The Section 2 ping-pong count (`awaiting-review` cycles per PR) split
+    by `lines_bucket` and `pr_type`. Coverage is bounded by the
+    `awaiting-review` label lifetime (retired 2024-07-10), so this
+    section is informative for the 2021-08 → 2024-07 cohort only.
+    """)
+    return
+
+
+@app.cell
+def _(DEFAULT_LINES_BREAKS, bucket_labels, intervals_shape, mo, pl):
+    """Per-PR `awaiting-review` cycle count, joined back to shape attrs."""
+    review_cycles_shape = (
+        intervals_shape.filter(pl.col("label_name") == "awaiting-review")
+        .group_by(["pull_request_id", "lines_bucket", "pr_type"])
+        .agg(pl.len().alias("review_cycles"))
+    )
+    _bucket_order = bucket_labels(DEFAULT_LINES_BREAKS)
+    ping_by_lines = (
+        review_cycles_shape.filter(pl.col("lines_bucket").is_not_null())
+        .group_by("lines_bucket")
+        .agg(
+            [
+                pl.len().alias("prs"),
+                pl.col("review_cycles").median().alias("median_cycles"),
+                pl.col("review_cycles").quantile(0.75).alias("p75_cycles"),
+                pl.col("review_cycles").max().alias("max_cycles"),
+                (pl.col("review_cycles") > 1).mean().alias("share_multi_cycle"),
+            ]
+        )
+        .with_columns(pl.col("lines_bucket").cast(pl.Enum(_bucket_order)).alias("_o"))
+        .sort("_o")
+        .drop("_o")
+    )
+    mo.md("### Ping-pong cycles by lines_bucket")
+    ping_by_lines
+    return (review_cycles_shape,)
+
+
+@app.cell
+def _(DEFAULT_PR_TYPES, mo, pl, review_cycles_shape):
+    """Ping-pong cycle summary per canonical `pr_type`."""
+    _types = list(DEFAULT_PR_TYPES) + ["other", "unparsed"]
+    ping_by_type = (
+        review_cycles_shape.filter(pl.col("pr_type").is_not_null())
+        .group_by("pr_type")
+        .agg(
+            [
+                pl.len().alias("prs"),
+                pl.col("review_cycles").median().alias("median_cycles"),
+                pl.col("review_cycles").quantile(0.75).alias("p75_cycles"),
+                pl.col("review_cycles").max().alias("max_cycles"),
+                (pl.col("review_cycles") > 1).mean().alias("share_multi_cycle"),
+            ]
+        )
+        .with_columns(pl.col("pr_type").cast(pl.Enum(_types)).alias("_o"))
+        .sort("_o")
+        .drop("_o")
+    )
+    mo.md("### Ping-pong cycles by pr_type")
+    ping_by_type
     return
 
 

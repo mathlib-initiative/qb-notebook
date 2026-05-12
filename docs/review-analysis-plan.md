@@ -586,7 +586,7 @@ maintainer-team count per area ranges 0–17 (`t-algebra` highest, with
 all); the `other` column is near-zero, confirming
 `attribute_label_events` cleanly excludes the bots.
 
-### Cross-cuts: shape and area effects on review state (Session 8)
+### Cross-cuts: shape and area effects on review state (Session 8) — shipped
 
 Earlier themes ran before `pr_shape` and `labels_active_at` shipped.
 Session 8 retrofits those helpers back into Themes 1 and 3 by
@@ -645,6 +645,32 @@ No new helper functions needed — everything wires up from existing
 **Out of scope for Session 8**: extending `area_health.py` with shape
 cuts. Area × shape is a natural next step but doubles the surface; if
 the Session 8 findings make it interesting, spin out as Session 8b.
+
+**Empirical findings on the current artifact**:
+
+- **Sojourn × size** (label-based, `awaiting-review`): median 0.37d
+  (0-10 lines) → 0.89d (51-200) → 0.79d (1001+). A real but modest
+  size effect — the 1001+ bucket doesn't dominate the way it does for
+  end-to-end TTM. Reviewers spend disproportionately more time on
+  mid-sized PRs (51-200) than on the very largest.
+- **Ping-pong × size** (label-based, `awaiting-review` cycles per
+  PR): `share_multi_cycle` 5 % (0-10) → 12 % (11-50) → 20-22 %
+  (51+). Bigger PRs ping-pong ~4× as often, as expected.
+- **Stall signals × size** (Theme 3): merge-conflict prevalence
+  climbs 0.7 % → 1.6 % → 4.0 % → 7.2 % → 11.2 % across the size
+  buckets — a clean 16× gradient that confirms merge-conflict is the
+  dominant size-correlated stall. `awaiting-CI` prevalence is flat
+  (~2.4 % across all sizes) so it's *not* a size-driven signal.
+- **Stall signals × area** (Theme 3): `t-algebra` dominates volume
+  (n=1937, 27 % of approved-and-merged cohort); per-area
+  merge-conflict shares range 2.0–3.9 % (n ≥ 20) — no single area is
+  a runaway outlier. Per-area median `mm→merge` is highest in
+  `t-meta` (0.72d) — meta-infra changes evidently carry more
+  bors-queue overhead than the math content areas.
+- **Queue-cycle × size** (queue-window companion): `share_multi`
+  (PRs with `cycle_index > 0`) climbs 18 % (0-10) → 59 % (201-1000)
+  then drops back to 44 % for 1001+. Same long-tail "large refactor
+  PRs get fast-tracked" pattern Theme 5 surfaced for raw TTM.
 
 ### Theme-2 active-reviewer trend × team (Session 9) — shipped
 
@@ -711,7 +737,7 @@ for the rest.
 | 5       | Theme 5: PR shape              | `marimo/pr_shape_effects.py` + `qb_notebook/pr_shape.py` | shipped  |
 | 6       | Cleanup: boilerplate           | `merged_prs_frame`, label/window constants, `expr_is_draft` fix | shipped |
 | 7       | Theme 4: team × area matrix    | team annotation on reviewer × area matrix in `area_health.py` | shipped |
-| 8       | Cross-cuts: shape × area       | Theme 1/3 sojourn & stall signals × `pr_type`/`lines_bucket`/area | planned |
+| 8       | Cross-cuts: shape × area       | Theme 1/3 sojourn & stall signals × `pr_type`/`lines_bucket`/area | shipped |
 | 9       | Theme 2/5: tier + WIP follow-ups | active-reviewer trend split by team; `had_wip_label_at_open` cut | shipped |
 | 10      | Plot site polish               | promote best plots from each notebook                    | planned  |
 
