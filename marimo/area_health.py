@@ -42,8 +42,7 @@ def _():
     import numpy as np
     import polars as pl
 
-    from qb_notebook.data_io import load_pr_interval_data
-    from qb_notebook.filters import expr_merged_at_effective, expr_merged_to_master
+    from qb_notebook.data_io import load_pr_interval_data, merged_prs_frame
     from qb_notebook.review_states import (
         attribute_label_events,
         label_intervals,
@@ -56,12 +55,11 @@ def _():
         Path,
         attribute_label_events,
         datetime,
-        expr_merged_at_effective,
-        expr_merged_to_master,
         label_intervals,
         label_overlap_seconds,
         labels_active_at,
         load_pr_interval_data,
+        merged_prs_frame,
         np,
         pl,
         plt,
@@ -197,19 +195,16 @@ def _(mo):
 
 @app.cell
 def _(
-    expr_merged_at_effective,
-    expr_merged_to_master,
     labels_active_at,
+    merged_prs_frame,
     pl,
     prs,
     t_intervals,
 ):
     """Per (area, merge_month) row for every merge-to-master event whose PR
     carried at least one `t-*` label at merge time."""
-    merged = (
-        prs.filter(expr_merged_to_master())
-        .with_columns(expr_merged_at_effective().alias("merged_at"))
-        .select(pl.col("id").alias("pull_request_id"), "gh_created_at", "merged_at")
+    merged = merged_prs_frame(prs, effective_col="merged_at").select(
+        pl.col("id").alias("pull_request_id"), "gh_created_at", "merged_at"
     )
     merge_pts = merged.select(
         "pull_request_id", "gh_created_at", pl.col("merged_at").alias("at")
@@ -427,9 +422,9 @@ def _(
     timedelta,
 ):
     """Attributed maintainer-merge triggers × area at trigger time."""
-    mm_attr = attribute_label_events(
-        events, "maintainer-merge", window_seconds=600
-    ).filter(pl.col("attributed"))
+    mm_attr = attribute_label_events(events, "maintainer-merge").filter(
+        pl.col("attributed")
+    )
     trigger_pts = mm_attr.select(
         "pull_request_id",
         pl.col("inferred_actor").alias("reviewer"),

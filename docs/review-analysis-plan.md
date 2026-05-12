@@ -531,6 +531,95 @@ ruleset preserving the original `awaiting-review` semantics, so the
 choice of ruleset_id encodes "court" rather than living in helper
 code.
 
+---
+
+## Post-Theme-5 cleanup pass
+
+After all five themes shipped, a survey across the codebase surfaced
+consolidation opportunities and cross-cuts that earlier themes can borrow
+from later ones. Tracked separately so they can be picked up incrementally.
+
+### Boilerplate consolidation (Session 6)
+
+- **`merged_prs_frame(prs, *, effective_col=...)`** in
+  `qb_notebook/data_io.py` to replace the 5-notebook duplicated
+  `prs.filter(expr_merged_to_master()).with_columns(
+  expr_merged_at_effective().alias(...))` pattern. Standardizes the
+  subtle name drift between callsites (`"merged_at"` in
+  `area_health.py` / `pr_shape_effects.py` vs `"merged_at_effective"`
+  elsewhere).
+- **`MAINTAINER_MERGE_LABEL` / `READY_TO_MERGE_LABEL` constants** in
+  `qb_notebook/review_states.py` to replace string literals scattered
+  across notebooks (typo-safety; not aggressively migrated).
+- **`DEFAULT_ATTRIBUTION_WINDOW_SECONDS = 600`** constant in
+  `qb_notebook/review_states.py`, used as the default of
+  `attribute_label_events`. Two notebooks currently pass `600`
+  explicitly — drop those.
+- **`expr_is_draft` fix**: currently exported but unused, and compares
+  to `True` (Bool) while the parquet column is Postgres-style
+  `"t"`/`"f"` string (flagged in Theme 5 notes). Update the helper to
+  take an overridable `draft_true="t"` default and adopt it where
+  `review_state_machine.py` inlines `~pl.col("is_draft").fill_null(False)`.
+
+The marimo notebook bootstrap (`sys.path` + data dir) is deliberately
+**not** extracted: `qb_notebook` is not installed as a package (see
+`pyproject.toml` `[tool.uv] package = false`), so the bootstrap creates
+its own `sys.path` entry — a helper inside `qb_notebook` would not be
+reachable until after. Flipping `package = true` and editable-installing
+is a bigger architectural change tracked separately.
+
+### Theme-4 follow-up: team-annotated reviewer × area matrix (Session 7)
+
+Theme 4 implementation notes (above) already flag this as a follow-up.
+The bipartite reviewer × area matrix in `marimo/area_health.py`
+(lines 467–501) renders without team membership. The pattern already
+exists in `marimo/reviewer_load.py` (per-reviewer table + bors-trigger
+table both annotate `_maint` / `_rev` columns via the `teams`
+dataclass); port the same annotation onto the area matrix.
+
+### Cross-cuts: shape and area effects on review state (Session 8)
+
+Earlier themes ran before `pr_shape` and `labels_active_at` shipped.
+Adding facets:
+
+- **Theme 1 sojourn × shape**: `review_state_machine.py` /
+  `queue_window_state.py` sojourn distributions and ping-pong counts
+  faceted by `pr_type` and `lines_bucket`. Does `feat:` ping-pong more
+  than `chore:`? Are 1000+-line PRs in `awaiting-review` longer?
+- **Theme 3 stall signals × area**: `bottleneck_localization.py`
+  `had_merge_conflict` / `had_awaiting_author` / `had_awaiting_CI`
+  prevalence broken down by area (via `labels_active_at(t_intervals,
+  approved_window_starts)`). Are merge-conflicts disproportionate in
+  any single `t-*` area?
+- **Theme 3 stall signals × shape**: same signals broken down by
+  `pr_type` and `lines_bucket`. A 1000+-line `feat:` likely has very
+  different stall-prevalence than a 1-line `chore:`.
+
+### Theme-2 active-reviewer trend × team (Session 9)
+
+Theme 2's active-reviewer rolling chart is aggregate. Splitting three
+ways (reviewer-team-only, maintainer-team-only, other contributors)
+makes "is the bench growing or shrinking" answerable per tier rather
+than across the whole population.
+
+### Theme-5 follow-ups (Session 9)
+
+- **`had_wip_label_at_open` cut** alongside `started_as_draft`
+  (Theme 5 notes above). A dedicated WIP-label predicate parallel to
+  the draft one.
+- **`expr_is_draft` bool fix** — also covered under Session 6
+  boilerplate consolidation; left here for cross-reference.
+
+### Plot site (Session 10)
+
+The 6 marimo notebooks build their plots as inline `plt.subplots()`
+cells. `qb_notebook/generate_plot_site.py` expects
+`render_*(ctx) -> Figure` functions registered via `PlotDefinition`.
+Promotion requires each notebook's headline plots extracted into a
+renderer module (e.g. `qb_notebook/plotting/theme_4.py`) and
+registered. Doing one notebook end-to-end first will set the pattern
+for the rest.
+
 ## Roadmap
 
 | Session | Theme                          | Deliverable                                              | Status   |
@@ -541,6 +630,12 @@ code.
 | 3.5     | Theme 1 companion (queue)      | `marimo/queue_window_state.py` + `queue_window_intervals`| shipped  |
 | 4       | Theme 4: area health           | `marimo/area_health.py` + `labels_active_at`             | shipped  |
 | 5       | Theme 5: PR shape              | `marimo/pr_shape_effects.py` + `qb_notebook/pr_shape.py` | shipped  |
-| 6       | Plot site polish               | promote best plots from each notebook                    | planned  |
+| 6       | Cleanup: boilerplate           | `merged_prs_frame`, label/window constants, `expr_is_draft` fix | planned |
+| 7       | Theme 4: team × area matrix    | team annotation on reviewer × area matrix in `area_health.py` | planned |
+| 8       | Cross-cuts: shape × area       | Theme 1/3 sojourn & stall signals × `pr_type`/`lines_bucket`/area | planned |
+| 9       | Theme 2/5: tier + WIP follow-ups | active-reviewer trend split by team; `had_wip_label_at_open` cut | planned |
+| 10      | Plot site polish               | promote best plots from each notebook                    | planned  |
 
-Order is flexible — Themes 1 and 2 are the highest-value starting points.
+Order is flexible — Themes 1 and 2 were the highest-value starting points;
+the post-Theme-5 sessions (6+) are cleanups and cross-cuts unlocked by the
+shipped helpers.

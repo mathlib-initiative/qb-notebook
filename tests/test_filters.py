@@ -6,6 +6,7 @@ from qb_notebook.filters import (
     expr_closed_by_event_type,
     expr_commenters_include_any,
     expr_interval_started_between,
+    expr_is_draft,
     expr_merged_at_effective,
     expr_merged_to_master,
     expr_opened_by_event_type,
@@ -232,6 +233,24 @@ def test_expr_merged_to_master_respects_custom_base_branch() -> None:
     df = _merge_fixture()
     out = df.filter(expr_merged_to_master(base_branch="bump/v4.21.0"))
     assert out["id"].to_list() == [2]
+
+
+def test_expr_is_draft_matches_postgres_string_default() -> None:
+    df = pl.DataFrame({"id": [1, 2, 3], "is_draft": ["t", "f", "t"]})
+    out = df.filter(expr_is_draft()).sort("id")
+    assert out["id"].to_list() == [1, 3]
+
+
+def test_expr_is_draft_negation_on_string_column() -> None:
+    df = pl.DataFrame({"id": [1, 2, 3], "is_draft": ["t", "f", "t"]})
+    out = df.filter(expr_is_draft(is_draft=False))
+    assert out["id"].to_list() == [2]
+
+
+def test_expr_is_draft_accepts_bool_override() -> None:
+    df = pl.DataFrame({"id": [1, 2, 3], "is_draft": [True, False, True]})
+    out = df.filter(expr_is_draft(draft_true=True)).sort("id")
+    assert out["id"].to_list() == [1, 3]
 
 
 def test_expr_merged_at_effective_prefers_merged_at() -> None:

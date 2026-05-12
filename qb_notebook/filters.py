@@ -131,8 +131,21 @@ def expr_state_is(state: str, *, state_col: str = "state") -> pl.Expr:
     return pl.col(state_col) == state
 
 
-def expr_is_draft(is_draft: bool = True, *, draft_col: str = "is_draft") -> pl.Expr:
-    return pl.col(draft_col) == is_draft
+def expr_is_draft(
+    is_draft: bool = True,
+    *,
+    draft_col: str = "is_draft",
+    draft_true: str | bool = "t",
+) -> pl.Expr:
+    """Match the ``is_draft`` flag on a PR table.
+
+    The queueboard parquet export carries Postgres ``"t"`` / ``"f"`` strings
+    (not native bool), so the default ``draft_true="t"`` matches that
+    schema. Pass ``draft_true=True`` if the column has been cast to Bool
+    upstream.
+    """
+    match = pl.col(draft_col) == draft_true
+    return match if is_draft else ~match
 
 
 def expr_additions_between(

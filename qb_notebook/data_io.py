@@ -7,6 +7,8 @@ from typing import Iterable
 
 import polars as pl
 
+from qb_notebook.filters import expr_merged_at_effective, expr_merged_to_master
+
 # FK columns on analyzer_prqueuewindow that Django exports as Float64
 # (nullable integer columns come out as float in pandas/parquet exports).
 _QUEUE_WINDOW_FK_COLS: tuple[str, ...] = (
@@ -181,6 +183,31 @@ def load_contributor_config(path: str | Path) -> list[ContributorEntry]:
         )
         for entry in data
     ]
+
+
+def merged_prs_frame(
+    prs: pl.DataFrame,
+    *,
+    effective_col: str = "merged_at_effective",
+) -> pl.DataFrame:
+    """PRs filtered to merged-to-master, with the bors-aware effective merge
+    timestamp added as ``effective_col``.
+
+    `prs.merged_at` is null for the vast majority of mathlib merges (bors
+    closes PRs after pushing to master rather than using GitHub's merge
+    flow). This helper combines :func:`~qb_notebook.filters.expr_merged_to_master`
+    and :func:`~qb_notebook.filters.expr_merged_at_effective` into the
+    canonical derived frame that downstream analyses join against.
+
+    The default ``effective_col="merged_at_effective"`` matches the
+    "preserve `prs.merged_at` alongside the bors fallback" style used by
+    `marimo/queue_window_state.py` and `marimo/review_state_machine.py`.
+    Pass ``effective_col="merged_at"`` to overwrite-style frames (e.g.
+    `marimo/area_health.py`, `marimo/pr_shape_effects.py`).
+    """
+    return prs.filter(expr_merged_to_master()).with_columns(
+        expr_merged_at_effective().alias(effective_col)
+    )
 
 
 def split_queue_windows_by_rule(

@@ -61,8 +61,8 @@ def _():
     import numpy as np
     import polars as pl
 
-    from qb_notebook.data_io import load_pr_interval_data
-    from qb_notebook.filters import expr_merged_at_effective, expr_merged_to_master
+    from qb_notebook.data_io import load_pr_interval_data, merged_prs_frame
+    from qb_notebook.filters import expr_is_draft
     from qb_notebook.review_states import (
         MATHLIB_LABEL_RETIRED_AT,
         label_intervals,
@@ -73,10 +73,10 @@ def _():
         MATHLIB_LABEL_RETIRED_AT,
         Path,
         datetime,
-        expr_merged_at_effective,
-        expr_merged_to_master,
+        expr_is_draft,
         label_intervals,
         load_pr_interval_data,
+        merged_prs_frame,
         np,
         pl,
         plt,
@@ -110,7 +110,7 @@ def _(mo):
 
 
 @app.cell
-def _(expr_merged_at_effective, expr_merged_to_master, pl, prs):
+def _(merged_prs_frame, pl, prs):
     """Bors-aware merged-to-master view of the PR table.
 
     `prs.merged_at` is null for the vast majority of mathlib merges (bors
@@ -118,19 +118,15 @@ def _(expr_merged_at_effective, expr_merged_to_master, pl, prs):
     flow), so we build a small derived frame that exposes the right
     boolean + timestamp once and reuse it everywhere downstream.
     """
-    merged_prs = (
-        prs.filter(expr_merged_to_master())
-        .with_columns(expr_merged_at_effective().alias("merged_at_effective"))
-        .select(
-            [
-                pl.col("id").alias("pull_request_id"),
-                "gh_created_at",
-                "closed_at",
-                "merged_at",
-                "merged_at_effective",
-                "is_draft",
-            ]
-        )
+    merged_prs = merged_prs_frame(prs).select(
+        [
+            pl.col("id").alias("pull_request_id"),
+            "gh_created_at",
+            "closed_at",
+            "merged_at",
+            "merged_at_effective",
+            "is_draft",
+        ]
     )
     return (merged_prs,)
 
@@ -171,7 +167,7 @@ def _(
 
 
 @app.cell
-def _(exclude_drafts, intervals_all, merged_only, merged_prs, pl, prs):
+def _(exclude_drafts, expr_is_draft, intervals_all, merged_only, merged_prs, pl, prs):
     _pr_meta = prs.select(
         [
             pl.col("id").alias("pull_request_id"),
@@ -186,7 +182,10 @@ def _(exclude_drafts, intervals_all, merged_only, merged_prs, pl, prs):
             how="inner",
         )
     if exclude_drafts.value:
-        _df = _df.filter(~pl.col("is_draft").fill_null(False))
+        # `is_draft` arrives as a Postgres "t"/"f" string; `expr_is_draft`
+        # default targets that schema. Treat null (PR not in join) as
+        # non-draft so the row is kept.
+        _df = _df.filter(expr_is_draft(is_draft=False) | pl.col("is_draft").is_null())
     intervals = _df
     return (intervals,)
 

@@ -3,6 +3,7 @@ import polars as pl
 import json
 import os
 import tempfile
+from datetime import datetime, timezone
 
 from qb_notebook.data_io import (
     DEFAULT_DATETIME_COLUMNS,
@@ -10,6 +11,7 @@ from qb_notebook.data_io import (
     ContributorInterval,
     _cast_float_to_nullable_int,
     load_contributor_config,
+    merged_prs_frame,
     parse_datetime_columns,
 )
 
@@ -135,3 +137,59 @@ def test_cast_float_to_nullable_int_ignores_missing_cols() -> None:
     df = pl.DataFrame({"id": [1, 2]})
     out = _cast_float_to_nullable_int(df, ["nonexistent_col"])
     assert out.to_dict(as_series=False) == df.to_dict(as_series=False)
+
+
+def _merged_prs_fixture() -> pl.DataFrame:
+    """Mirrors tests/test_filters.py::_merge_fixture but with a few extra cols
+    so we can verify pass-through semantics of `merged_prs_frame`.
+    """
+    return pl.DataFrame(
+        {
+            "id": [1, 2, 3, 4],
+            "base_ref_name": ["master", "master", "master", "master"],
+            "state": ["closed", "merged", "open", "closed"],
+            "title": [
+                "[Merged by Bors] - feat: foo",  # bors-merged
+                "feat: github-merged",  # github-merged
+                "feat: still open",  # open
+                "feat: abandoned",  # closed, never merged
+            ],
+            "merged_at": [
+                None,
+                datetime(2025, 3, 1, tzinfo=timezone.utc),
+                None,
+                None,
+            ],
+            "closed_at": [
+                datetime(2025, 4, 1, tzinfo=timezone.utc),
+                datetime(2025, 3, 1, tzinfo=timezone.utc),
+                None,
+                datetime(2025, 4, 4, tzinfo=timezone.utc),
+            ],
+            "is_draft": ["f", "f", "f", "f"],
+        }
+    )
+
+
+def test_merged_prs_frame_default_column_name() -> None:
+    out = merged_prs_frame(_merged_prs_fixture()).sort("id")
+    assert "merged_at_effective" in out.columns
+    assert out["id"].to_list() == [1, 2]
+    # Bors-merged: falls back to closed_at; GitHub-merged: keeps merged_at.
+    assert out["merged_at_effective"].to_list() == [
+        datetime(2025, 4, 1, tzinfo=timezone.utc),
+        datetime(2025, 3, 1, tzinfo=timezone.utc),
+    ]
+
+
+def test_merged_prs_frame_custom_column_name() -> None:
+    out = merged_prs_frame(_merged_prs_fixture(), effective_col="merged_at")
+    # The column is overwritten, not coexistent with the original `merged_at`.
+    assert out.columns.count("merged_at") == 1
+    assert out["merged_at"].null_count() == 0
+
+
+def test_merged_prs_frame_preserves_other_columns() -> None:
+    out = merged_prs_frame(_merged_prs_fixture())
+    for col in ("id", "base_ref_name", "state", "title", "is_draft"):
+        assert col in out.columns

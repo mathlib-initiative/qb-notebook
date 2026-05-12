@@ -53,8 +53,8 @@ def _():
     import numpy as np
     import polars as pl
 
-    from qb_notebook.data_io import load_pr_interval_data
-    from qb_notebook.filters import expr_merged_at_effective, expr_merged_to_master
+    from qb_notebook.data_io import load_pr_interval_data, merged_prs_frame
+    from qb_notebook.filters import expr_merged_to_master
     from qb_notebook.pr_shape import (
         DEFAULT_FILES_BREAKS,
         DEFAULT_LINES_BREAKS,
@@ -79,9 +79,9 @@ def _():
         author_cohort,
         bucket_labels,
         datetime,
-        expr_merged_at_effective,
         expr_merged_to_master,
         load_pr_interval_data,
+        merged_prs_frame,
         np,
         pl,
         plt,
@@ -125,7 +125,7 @@ def _(author_cohort, events, pr_type, prs_raw, size_buckets, started_as_draft):
 
 
 @app.cell
-def _(expr_merged_at_effective, expr_merged_to_master, pl, prs):
+def _(merged_prs_frame, pl, prs):
     """Merge cohort: PRs merged to master with bors-aware merged_at.
 
     `merged_prs` is the merged subset with:
@@ -134,8 +134,7 @@ def _(expr_merged_at_effective, expr_merged_to_master, pl, prs):
       - all cohort attrs from `prs`.
     """
     merged_prs = (
-        prs.filter(expr_merged_to_master())
-        .with_columns(expr_merged_at_effective().alias("merged_at"))
+        merged_prs_frame(prs, effective_col="merged_at")
         .with_columns(
             (
                 (pl.col("merged_at") - pl.col("gh_created_at")).dt.total_seconds()
@@ -542,9 +541,9 @@ def _(attribute_label_events, events, merged_prs, pl):
     applications to the same PR (e.g. force-push reapply) each count as
     one trigger, consistent with Theme 2 / `reviewer_load.py`.
     """
-    mm_attr_raw = attribute_label_events(
-        events, "maintainer-merge", window_seconds=600
-    ).filter(pl.col("attributed"))
+    mm_attr_raw = attribute_label_events(events, "maintainer-merge").filter(
+        pl.col("attributed")
+    )
     reviewer_cohort = mm_attr_raw.join(
         merged_prs.select("id", "is_first_pr", "author_id"),
         left_on="pull_request_id",

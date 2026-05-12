@@ -51,18 +51,16 @@ def _():
     import numpy as np
     import polars as pl
 
-    from qb_notebook.data_io import load_pr_interval_data
-    from qb_notebook.filters import expr_merged_at_effective, expr_merged_to_master
+    from qb_notebook.data_io import load_pr_interval_data, merged_prs_frame
     from qb_notebook.review_states import label_intervals, label_overlap_seconds
 
     return (
         Path,
         datetime,
-        expr_merged_at_effective,
-        expr_merged_to_master,
         label_intervals,
         label_overlap_seconds,
         load_pr_interval_data,
+        merged_prs_frame,
         np,
         pl,
         plt,
@@ -88,18 +86,14 @@ def _(Path, datetime, load_pr_interval_data, pl, timezone):
 
 
 @app.cell
-def _(expr_merged_at_effective, expr_merged_to_master, pl, prs):
+def _(merged_prs_frame, pl, prs):
     """Bors-aware merged-to-master view: id, gh_created_at, merged_at_effective."""
-    merged_prs = (
-        prs.filter(expr_merged_to_master())
-        .with_columns(expr_merged_at_effective().alias("merged_at_effective"))
-        .select(
-            [
-                pl.col("id").alias("pull_request_id"),
-                "gh_created_at",
-                "merged_at_effective",
-            ]
-        )
+    merged_prs = merged_prs_frame(prs).select(
+        [
+            pl.col("id").alias("pull_request_id"),
+            "gh_created_at",
+            "merged_at_effective",
+        ]
     )
     return (merged_prs,)
 
