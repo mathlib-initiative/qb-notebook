@@ -7,6 +7,7 @@ from qb_notebook.review_states import (
     label_intervals,
     label_overlap_seconds,
     queue_window_intervals,
+    reviewers_court_intervals,
     stage_timestamps,
 )
 
@@ -752,6 +753,139 @@ def test_queue_window_intervals_filters_by_ruleset() -> None:
     out_all = queue_window_intervals(qw, rule_set_id=None, asof=_dt(10))
     assert out_all.height == 2
     assert sorted(out_all["rule_set_id"].to_list()) == [2, 3]
+
+
+def test_reviewers_court_prefers_queue_window_per_pr() -> None:
+    """When a PR has both signals, only queue-window rows survive."""
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(1),
+                "type": "LABELED",
+                "label_name": "awaiting-review",
+                "actor_login": "alice",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(2),
+                "type": "UNLABELED",
+                "label_name": "awaiting-review",
+                "actor_login": "alice",
+            },
+        ]
+    )
+    qw = _queue_windows(
+        [
+            {
+                "pull_request_id": 1,
+                "rule_set_id": 3,
+                "cycle_index": 1,
+                "window_count": 1,
+                "first_on_queue_ts": _dt(1),
+                "from_ts": _dt(1),
+                "to_ts": _dt(3),
+                "opened_by_event_type": "CI_PASSED",
+                "closed_by_event_type": "CI_PASSED",
+            },
+        ]
+    )
+    out = reviewers_court_intervals(ev, qw, asof=_dt(10))
+    assert out.height == 1
+    assert out["source"].to_list() == ["queue_window"]
+    assert out["end"].to_list() == [_dt(3)]
+
+
+def test_reviewers_court_falls_back_to_label_when_queue_missing() -> None:
+    """PRs with no queue-window rows use label intervals."""
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(1),
+                "type": "LABELED",
+                "label_name": "awaiting-review",
+                "actor_login": "alice",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(2),
+                "type": "UNLABELED",
+                "label_name": "awaiting-review",
+                "actor_login": "alice",
+            },
+        ]
+    )
+    qw = _queue_windows([])
+    out = reviewers_court_intervals(ev, qw, asof=_dt(10))
+    assert out.height == 1
+    assert out["source"].to_list() == ["label"]
+    assert out["duration_days"].to_list() == [1.0]
+
+
+def test_reviewers_court_mixed_cohort() -> None:
+    """Queue PR yields queue rows; label-only PR yields label rows."""
+    ev = _events(
+        [
+            {
+                "pull_request_id": 2,
+                "occurred_at": _dt(1),
+                "type": "LABELED",
+                "label_name": "awaiting-review",
+                "actor_login": "alice",
+            },
+            {
+                "pull_request_id": 2,
+                "occurred_at": _dt(2),
+                "type": "UNLABELED",
+                "label_name": "awaiting-review",
+                "actor_login": "alice",
+            },
+        ]
+    )
+    qw = _queue_windows(
+        [
+            {
+                "pull_request_id": 1,
+                "rule_set_id": 3,
+                "cycle_index": 1,
+                "window_count": 1,
+                "first_on_queue_ts": _dt(1),
+                "from_ts": _dt(1),
+                "to_ts": _dt(3),
+                "opened_by_event_type": "CI_PASSED",
+                "closed_by_event_type": "CI_PASSED",
+            },
+        ]
+    )
+    out = reviewers_court_intervals(ev, qw, asof=_dt(10)).sort("pull_request_id")
+    assert out["pull_request_id"].to_list() == [1, 2]
+    assert out["source"].to_list() == ["queue_window", "label"]
+
+
+def test_reviewers_court_label_asof_clamps_open_label_intervals() -> None:
+    """label_asof bounds end_effective for label intervals without UNLABELED."""
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(1),
+                "type": "LABELED",
+                "label_name": "awaiting-review",
+                "actor_login": "alice",
+            },
+        ]
+    )
+    qw = _queue_windows([])
+    asof = _dt(20)
+    label_asof = _dt(5)
+    out = reviewers_court_intervals(ev, qw, asof=asof, label_asof=label_asof)
+    assert out.height == 1
+    row = out.row(0, named=True)
+    assert row["source"] == "label"
+    assert row["is_open"] is True
+    assert row["end_effective"] == label_asof
+    assert row["duration_days"] == 4.0
 
 
 def test_queue_window_intervals_overlap_with_label_overlap_seconds() -> None:

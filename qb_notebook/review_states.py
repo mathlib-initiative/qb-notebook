@@ -426,6 +426,81 @@ def label_overlap_seconds(
     )
 
 
+_COURT_COMMON_COLS = (
+    "pull_request_id",
+    "source",
+    "start",
+    "end",
+    "is_open",
+    "end_effective",
+    "duration",
+    "duration_hours",
+    "duration_days",
+)
+
+
+def reviewers_court_intervals(
+    df_events: pl.DataFrame,
+    df_queue_windows: pl.DataFrame,
+    *,
+    rule_set_id: int | None = 3,
+    label: str = "awaiting-review",
+    asof: datetime | None = None,
+    label_asof: datetime | None = None,
+) -> pl.DataFrame:
+    """Unified per-PR "in reviewers' court" intervals.
+
+    The reviewer-court state on mathlib4 is recorded by two sources
+    with overlapping but non-identical coverage:
+
+    - `analyzer_prqueuewindow` ruleset 3 — machine-defined queue
+      windows, available 2021-05 → present, the analyzer's primary
+      definition of "PR is on the queue".
+    - The retired `awaiting-review` label — explicit reviewer-court
+      state used 2021-08 → 2024-07; ~98 % median Jaccard with the
+      queue window where both exist, but ~219 PRs in the dump have
+      label intervals without a corresponding queue-window row.
+
+    This helper combines them with queue-windows as primary and the
+    label as fallback per-PR (i.e. label intervals contribute only
+    for PRs that do not appear in the ruleset). The result is one row
+    per interval with a uniform shape that downstream helpers like
+    :func:`label_overlap_seconds` can consume directly.
+
+    Parameters
+    ----------
+    label_asof:
+        Clamp open label-source intervals at this timestamp instead of
+        ``asof``. Needed when ``label`` has been retired: deleting a
+        label from the repo does not emit ``UNLABELED`` events, so a
+        handful of historical applications stay "open" forever. For
+        mathlib's retired ``awaiting-review`` pass
+        ``datetime(2024, 7, 10, tzinfo=timezone.utc)``.
+
+    Returns columns:
+        ``pull_request_id``, ``source`` (``"queue_window"`` or
+        ``"label"``), ``start``, ``end``, ``is_open``,
+        ``end_effective``, ``duration``, ``duration_hours``,
+        ``duration_days``.
+    """
+    qw = queue_window_intervals(
+        df_queue_windows, rule_set_id=rule_set_id, asof=asof
+    ).with_columns(pl.lit("queue_window").alias("source"))
+
+    lbl_asof_arg = label_asof if label_asof is not None else asof
+    lbl = label_intervals(df_events, label, asof=lbl_asof_arg).with_columns(
+        pl.lit("label").alias("source")
+    )
+
+    qw_prs = qw.select("pull_request_id").unique()
+    lbl_fallback = lbl.join(qw_prs, on="pull_request_id", how="anti")
+
+    common = list(_COURT_COMMON_COLS)
+    return pl.concat([qw.select(common), lbl_fallback.select(common)]).sort(
+        ["pull_request_id", "start"]
+    )
+
+
 def queue_window_intervals(
     df_queue_windows: pl.DataFrame,
     *,

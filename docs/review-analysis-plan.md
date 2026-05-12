@@ -293,13 +293,20 @@ losing reviewer coverage?
 - Areas with declining `maintainer-merge` activity over the last 6 months.
 
 **Data**: `prs`, `prlabel`, `label_defs` (filtered to `t-*`), `events`,
-team-membership YAML.
+`queue_windows`, team-membership YAML.
 
 **Output**: `area_health.ipynb` + per-area summary table on the plot site.
 
 **Open questions**:
 - A PR can have multiple `t-*` labels — count toward each, or pick one
   (e.g. first applied)?
+
+**Notes**:
+- Use `reviewers_court_intervals` (cross-cutting infra below) for the
+  "active reviewer count" and any per-area reviewer-court latency
+  computations, so the metric is comparable across mathlib4's full
+  history rather than disappearing after the `awaiting-review`
+  retirement.
 
 ---
 
@@ -313,8 +320,9 @@ first-time contributors wait longer?
 **Plots / metrics**:
 
 - Size buckets (`additions + deletions`, `changed_files_count`) vs
-  median time-to-first-`awaiting-review`-removal and time-to-merge. Box
-  plots by bucket.
+  median time-to-first-reviewer-court-exit (use
+  `reviewers_court_intervals` so the metric survives the
+  `awaiting-review` retirement) and time-to-merge. Box plots by bucket.
 - First-time vs returning contributors (first-seen `author_id` in
   `syncer_pullrequest`): merge-time distributions, ratio of PRs reviewed,
   ratio merged vs abandoned.
@@ -356,21 +364,19 @@ These keep showing up in multiple themes and should be implemented once:
   checkout at runtime.
 - **`actor_counts(events, label_name, freq='1mo')`** — group LABELED
   events by actor and time bucket. Used by Themes 2, 4.
+- **`reviewers_court_intervals(events, queue_windows, *, asof, label_asof)`** —
+  unified per-PR "in reviewers' court" intervals. Per-PR, queue-window
+  (ruleset 3) is primary; `awaiting-review` label intervals fall back
+  for the ~219 PRs (2022-12 → 2024-07) whose data the analyzer
+  missed. Returns the common interval columns
+  (`start`/`end`/`is_open`/`end_effective`/`duration*`) plus a
+  `source` column ("queue_window" | "label"). The optional
+  `label_asof` parameter clamps label-source intervals to a retirement
+  date (mathlib: `datetime(2024, 7, 10, UTC)`) since label deletion
+  doesn't emit `UNLABELED` events. Lives in
+  `qb_notebook/review_states.py`. To be reused by Themes 2, 4, and
+  5. ✅ shipped.
 
-### Future TODO — unified "in reviewers' court" intervals
-
-The reviewer-court state is split across two regimes in the current
-data: explicit `awaiting-review` label intervals (2021-08 → 2024-07)
-and the queue-window-based state afterwards. The pieces are in place:
-`qb_notebook.review_states.queue_window_intervals` returns
-queue-derived intervals in the same shape as `label_intervals`, and
-the overlap cohort in `marimo/queue_window_state.py` confirms ~98 %
-median Jaccard between the two signals during the overlap years —
-strong enough to lean on. The remaining step is a thin helper that
-returns a single per-PR set of intervals (queue-window everywhere,
-since it covers 2021-05 → present, with the option to also union in
-`awaiting-review` for the small slice where the queue window misses
-something) so Themes 2, 4, and 5 can use one definition end-to-end.
 A nice-to-have upstream change: an explicit `queueboard-core`
 ruleset preserving the original `awaiting-review` semantics, so the
 choice of ruleset_id encodes "court" rather than living in helper
