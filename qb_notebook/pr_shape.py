@@ -137,6 +137,73 @@ def author_cohort(
     )
 
 
+# Default grace window for `had_wip_label_at_open` — matches the
+# `attribute_label_events` default and captures ~77% of LABELED(WIP)
+# events on mathlib4 (the bimodal "applied at open vs. converted to WIP
+# later" distribution has a sharp cliff well before 10 minutes).
+DEFAULT_WIP_AT_OPEN_WINDOW_SECONDS = 600
+
+
+def had_wip_label_at_open(
+    df_prs: pl.DataFrame,
+    df_events: pl.DataFrame,
+    *,
+    pr_id_col: str = "id",
+    created_col: str = "gh_created_at",
+    wip_label_name: str = "WIP",
+    open_window_seconds: int = DEFAULT_WIP_AT_OPEN_WINDOW_SECONDS,
+) -> pl.DataFrame:
+    """Add `had_wip_label_at_open` (bool) to a PR frame.
+
+    A PR is flagged True if its earliest `LABELED(WIP)` event occurred
+    within ``open_window_seconds`` of `gh_created_at`. The default
+    10-minute window mirrors `attribute_label_events` and matches the
+    bimodal LABELED(WIP) timing observed on mathlib4 (most WIPs are
+    applied within seconds of PR creation; the long tail is PRs
+    converted to WIP later in their life).
+
+    PRs with no `LABELED(WIP)` event get False. Negative gaps (label
+    timestamp slightly earlier than `gh_created_at`, e.g. clock skew)
+    are accepted as "at open" too.
+
+    This is intended as a workflow-signal companion to
+    :func:`started_as_draft`: `started_as_draft` captures GitHub-native
+    draft state, while `had_wip_label_at_open` captures mathlib's
+    label-driven "not yet ready for review" convention. The two cuts
+    are largely orthogonal in practice on mathlib4 (of ~3.6 k WIP-at-open
+    merged PRs, only ~5 % also started as draft) — they capture distinct
+    populations, not redundant relabels of the same one.
+    """
+    wip_first = (
+        df_events.filter(
+            (pl.col("label_name") == wip_label_name) & (pl.col("type") == "LABELED")
+        )
+        .drop_nulls(["pull_request_id", "occurred_at"])
+        .sort(["pull_request_id", "occurred_at"])
+        .group_by("pull_request_id", maintain_order=True)
+        .agg(pl.col("occurred_at").first().alias("_first_wip_labeled_at"))
+    )
+    return (
+        df_prs.join(
+            wip_first,
+            left_on=pr_id_col,
+            right_on="pull_request_id",
+            how="left",
+        )
+        .with_columns(
+            (
+                pl.col("_first_wip_labeled_at").is_not_null()
+                & (
+                    (pl.col("_first_wip_labeled_at") - pl.col(created_col))
+                    .dt.total_seconds()
+                    .le(open_window_seconds)
+                )
+            ).alias("had_wip_label_at_open")
+        )
+        .drop("_first_wip_labeled_at")
+    )
+
+
 def started_as_draft(
     df_prs: pl.DataFrame,
     df_events: pl.DataFrame,

@@ -449,14 +449,14 @@ Session 6).
   is still open at `asof` so the metric stays well defined. Bigger
   PRs have proportionally more open first intervals than smaller
   ones; the box-plot Ns reflect that selection.
-- The `WIP` label start was in the original Theme 5 plan but is not
-  broken out separately here — `WIP` is a mathlib4-specific workflow
-  signal rather than a GitHub state and overlaps heavily with draft
-  in practice. PRs titled `wip:` land in the `other` PR-type bucket
-  and read with much lower merge / reviewed rates than canonical
-  types, which captures a chunk of the signal cheaply; a dedicated
-  `had_wip_label_at_open` cut alongside `started_as_draft` would
-  still be a worthwhile follow-up.
+- The `WIP` label start was added in Session 9 as Section 4b via
+  `had_wip_label_at_open`. Empirically WIP-at-open is a strong but
+  *distinct* signal from `started_as_draft`: only ~5 % of WIP-at-open
+  merged PRs also started as draft. The earlier framing ("overlaps
+  heavily with draft in practice") was wrong — the two cuts capture
+  largely different populations. PRs titled `wip:` still land in the
+  `other` PR-type bucket and surface a slice of the signal through
+  the type axis as well.
 - The PR-type prefix is parsed from the title only, after stripping
   the bors `[Merged by Bors] -` rewrite. A handful of `(scope)`
   forms are tolerated (`feat(Algebra/X): ...`); titles that don't
@@ -604,20 +604,48 @@ Adding facets:
   `pr_type` and `lines_bucket`. A 1000+-line `feat:` likely has very
   different stall-prevalence than a 1-line `chore:`.
 
-### Theme-2 active-reviewer trend × team (Session 9)
+### Theme-2 active-reviewer trend × team (Session 9) — shipped
 
-Theme 2's active-reviewer rolling chart is aggregate. Splitting three
-ways (reviewer-team-only, maintainer-team-only, other contributors)
-makes "is the bench growing or shrinking" answerable per tier rather
-than across the whole population.
+`marimo/reviewer_load.py` now renders a second active-reviewer
+rolling chart immediately after the aggregate one, splitting three
+ways by team membership (maintainer / reviewer / other) when the
+sibling `leanprover-community.github.io` checkout is present. Same
+trailing-window helper (`rolling_distinct_actors`), same colour
+palette as the team overlay added in Session 7. Empirical on the
+current artifact: reviewer-tier dominates (~26 distinct attributed
+actors over the project lifetime), maintainer-tier second (~20),
+"other" is tiny (3 actors, 4 events) — mostly stale or
+not-yet-listed logins. Most-recent 28-day window: 17 reviewers + 4
+maintainers, no "other".
 
-### Theme-5 follow-ups (Session 9)
+### Theme-5 follow-ups (Session 9) — shipped
 
-- **`had_wip_label_at_open` cut** alongside `started_as_draft`
-  (Theme 5 notes above). A dedicated WIP-label predicate parallel to
-  the draft one.
-- **`expr_is_draft` bool fix** — also covered under Session 6
-  boilerplate consolidation; left here for cross-reference.
+- **`had_wip_label_at_open(df_prs, df_events)`** added to
+  `qb_notebook/pr_shape.py`: a PR is flagged True when the earliest
+  `LABELED(WIP)` event fires within 10 minutes of `gh_created_at`
+  (default, configurable via `open_window_seconds`). The 10-minute
+  window matches `attribute_label_events` and captures ~77 % of
+  LABELED(WIP) events on mathlib4 — the apply-time distribution is
+  bimodal (sharp mode under 1 min, then a long tail of PRs converted
+  to WIP later). Five unit tests cover the within/outside-window,
+  first-LABELED-wins, no-events, and other-labels-ignored cases.
+- Wired into `marimo/pr_shape_effects.py` as Section 4b: outcome
+  funnel, TTM percentile table, and a 2×2 overlap matrix against
+  `started_as_draft`. Empirical findings:
+  - WIP-at-open merged-rate **73 %** vs **82 %** non-WIP; reviewed
+    rate **12 %** vs **22 %**; abandon rate **17 %** vs **11 %**.
+  - TTM median **3.9 d** vs **1.7 d** non-WIP; p90 **53 d** vs
+    **30 d**. WIP PRs are substantially slower and less likely to
+    merge — comparable in magnitude to the draft signal.
+  - 2×2 against `started_as_draft` is the surprise: only ~5 % of
+    WIP-at-open merged PRs also started as draft, and ~13 % of
+    started-as-draft merged PRs also had WIP-at-open. **The two
+    cuts are largely orthogonal**, not redundant — they capture
+    distinct populations. Earlier plan-doc framing ("overlaps
+    heavily with draft in practice") was wrong; corrected in the
+    notebook intro and Notes block.
+- **`expr_is_draft` bool fix** — already shipped under Session 6
+  boilerplate consolidation.
 
 ### Plot site (Session 10)
 
@@ -642,7 +670,7 @@ for the rest.
 | 6       | Cleanup: boilerplate           | `merged_prs_frame`, label/window constants, `expr_is_draft` fix | planned |
 | 7       | Theme 4: team × area matrix    | team annotation on reviewer × area matrix in `area_health.py` | shipped |
 | 8       | Cross-cuts: shape × area       | Theme 1/3 sojourn & stall signals × `pr_type`/`lines_bucket`/area | planned |
-| 9       | Theme 2/5: tier + WIP follow-ups | active-reviewer trend split by team; `had_wip_label_at_open` cut | planned |
+| 9       | Theme 2/5: tier + WIP follow-ups | active-reviewer trend split by team; `had_wip_label_at_open` cut | shipped |
 | 10      | Plot site polish               | promote best plots from each notebook                    | planned  |
 
 Order is flexible — Themes 1 and 2 were the highest-value starting points;

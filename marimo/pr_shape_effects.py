@@ -22,18 +22,20 @@ def _(mo):
     contributors wait longer or churn more? Are PRs that open as drafts
     different? Does `feat:` move at a different tempo than `chore:` or
     `refactor:`? This notebook slices the merge / court-exit metrics
-    from Themes 1-4 along four axes of the PR itself:
+    from Themes 1-4 along five axes of the PR itself:
 
     - **size**: `additions + deletions` and `changed_files_count` bucketed,
     - **author cohort**: first-PR (this author's earliest in the dataset)
       vs returning, plus author's PR-sequence number,
     - **draft history**: did the PR open as draft, or non-draft?
+    - **WIP-at-open**: did the mathlib4 `WIP` label fire within 10 min
+      of PR creation (parallel to draft, but project-specific)?
     - **type**: conventional-commit prefix on the title
       (`feat:`, `chore:`, `fix:`, `refactor:`, `doc:`, `perf:`, `ci:`,
       `style:`, `test:`, plus `other` / `unparsed` buckets).
 
     All cuts share the same per-PR row built up in the *cohort* cell, so
-    the five sections are directly comparable.
+    the sections are directly comparable.
     """)
     return
 
@@ -61,6 +63,7 @@ def _():
         DEFAULT_PR_TYPES,
         author_cohort,
         bucket_labels,
+        had_wip_label_at_open,
         pr_type,
         size_buckets,
         started_as_draft,
@@ -80,6 +83,7 @@ def _():
         bucket_labels,
         datetime,
         expr_merged_to_master,
+        had_wip_label_at_open,
         load_pr_interval_data,
         merged_prs_frame,
         np,
@@ -105,13 +109,25 @@ def _(Path, datetime, load_pr_interval_data, timezone):
 
 
 @app.cell
-def _(author_cohort, events, pr_type, prs_raw, size_buckets, started_as_draft):
-    """Per-PR shape attributes: size buckets, author cohort, draft history, type.
+def _(
+    author_cohort,
+    events,
+    had_wip_label_at_open,
+    pr_type,
+    prs_raw,
+    size_buckets,
+    started_as_draft,
+):
+    """Per-PR shape attributes: size buckets, author cohort, draft history,
+    WIP-at-open, type.
 
     `prs` is the prs frame plus columns:
       - `lines_changed`, `lines_bucket`, `files_bucket`
       - `author_first_pr_at`, `author_pr_seq`, `is_first_pr`
       - `started_as_draft`
+      - `had_wip_label_at_open` (mathlib4 `WIP` label applied within
+        10 min of PR creation — workflow-signal companion to
+        `started_as_draft`)
       - `pr_type` (conventional-commit prefix bucketed into 9 canonical
         types + `other` + `unparsed`)
 
@@ -120,7 +136,12 @@ def _(author_cohort, events, pr_type, prs_raw, size_buckets, started_as_draft):
     project lifetime; new authors who later return show up as
     `is_first_pr=False` on subsequent PRs.
     """
-    prs = pr_type(started_as_draft(author_cohort(size_buckets(prs_raw)), events))
+    prs = pr_type(
+        had_wip_label_at_open(
+            started_as_draft(author_cohort(size_buckets(prs_raw)), events),
+            events,
+        )
+    )
     return (prs,)
 
 
@@ -743,6 +764,105 @@ def _(merged_prs, pl):
 @app.cell
 def _(mo):
     mo.md("""
+    ## 4b. WIP-label at open
+
+    `had_wip_label_at_open` flags PRs whose first `LABELED(WIP)` event
+    fired within 10 minutes of `gh_created_at` — the mathlib4
+    label-driven analog of `started_as_draft`. The two cuts are
+    parallel but not redundant: `started_as_draft` captures
+    GitHub-native draft state, `had_wip_label_at_open` captures the
+    project-specific "not yet ready for review" convention. The
+    `WIP`-LABELED gap distribution is bimodal — most applications
+    fire within seconds (~70 % under 1 min), with a long tail of PRs
+    converted to WIP later. The 10-minute cutoff captures the front
+    mode cleanly.
+    """)
+    return
+
+
+@app.cell
+def _(events, expr_merged_to_master, pl, prs):
+    """Outcome funnel by WIP-at-open (same shape as the draft funnel)."""
+    _mm_prs = (
+        events.filter(
+            (pl.col("type") == "LABELED") & (pl.col("label_name") == "maintainer-merge")
+        )
+        .select("pull_request_id")
+        .unique()
+    )
+    wip_funnel = (
+        prs.with_columns(
+            [
+                expr_merged_to_master().alias("_merged"),
+                ((pl.col("state") == "closed") & ~expr_merged_to_master()).alias(
+                    "_abandoned"
+                ),
+                (pl.col("state") == "open").alias("_open"),
+                pl.col("id").is_in(_mm_prs["pull_request_id"]).alias("_reviewed"),
+            ]
+        )
+        .group_by("had_wip_label_at_open")
+        .agg(
+            [
+                pl.len().alias("n"),
+                pl.col("_merged").sum().alias("merged"),
+                pl.col("_abandoned").sum().alias("abandoned"),
+                pl.col("_open").sum().alias("open"),
+                pl.col("_reviewed").sum().alias("reviewed"),
+            ]
+        )
+        .with_columns(
+            [
+                (pl.col("merged") / pl.col("n")).alias("merged_rate"),
+                (pl.col("abandoned") / pl.col("n")).alias("abandoned_rate"),
+                (pl.col("reviewed") / pl.col("n")).alias("reviewed_rate"),
+            ]
+        )
+        .sort("had_wip_label_at_open", descending=True)
+    )
+    wip_funnel
+    return
+
+
+@app.cell
+def _(merged_prs, pl):
+    """TTM percentiles by WIP-at-open, with cohort sizes."""
+    ttm_by_wip = (
+        merged_prs.group_by("had_wip_label_at_open")
+        .agg(
+            [
+                pl.len().alias("n"),
+                pl.col("ttm_days").median().alias("median_d"),
+                pl.col("ttm_days").quantile(0.75).alias("p75_d"),
+                pl.col("ttm_days").quantile(0.9).alias("p90_d"),
+            ]
+        )
+        .sort("had_wip_label_at_open", descending=True)
+    )
+    ttm_by_wip
+    return
+
+
+@app.cell
+def _(merged_prs, pl):
+    """Overlap matrix: how much do `started_as_draft` and
+    `had_wip_label_at_open` agree on merged PRs? A 2x2 helps read the
+    "is this just a relabel of draft?" question. Empirically on the
+    current artifact: only ~5 % of WIP-at-open merged PRs also started
+    as draft, and only ~13 % of started-as-draft merged PRs also had
+    WIP-at-open. The two cuts capture largely distinct populations."""
+    wip_vs_draft = (
+        merged_prs.group_by(["started_as_draft", "had_wip_label_at_open"])
+        .agg(pl.len().alias("n"))
+        .sort(["started_as_draft", "had_wip_label_at_open"], descending=[True, True])
+    )
+    wip_vs_draft
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
     ## 5. PR type (title prefix)
 
     Conventional-commit-style prefix on the PR title, after stripping
@@ -967,12 +1087,15 @@ def _(mo):
       interval is still open at `asof` (so the metric stays well
       defined). Bigger PRs have more open first intervals than
       smaller ones; the box-plot Ns reflect that selection.
-    - WIP-label start (the original Theme 5 plan mentioned
-      "WIP/draft start") is **not** broken out separately here. The
-      `WIP` label is a Mathlib-specific workflow signal rather than
-      a GitHub state and overlaps heavily with draft in practice;
-      add a third draft-history category if you want to disentangle
-      them.
+    - WIP-label start is now broken out as Section 4b via
+      `had_wip_label_at_open`. It anchors on the *first*
+      `LABELED(WIP)` event within 10 minutes of `gh_created_at` —
+      enough to capture the front mode of the bimodal apply-time
+      distribution without false-positive on PRs that drift into WIP
+      later. The 2×2 with `started_as_draft` shows the two cuts are
+      largely orthogonal on mathlib4 (only ~5 % overlap on merged
+      PRs); they capture distinct populations rather than relabels
+      of each other.
     """)
     return
 

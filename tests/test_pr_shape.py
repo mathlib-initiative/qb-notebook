@@ -8,6 +8,7 @@ from qb_notebook.pr_shape import (
     DEFAULT_PR_TYPES,
     author_cohort,
     bucket_labels,
+    had_wip_label_at_open,
     pr_type,
     pr_type_order,
     size_buckets,
@@ -39,6 +40,20 @@ def _events(rows: list[dict]) -> pl.DataFrame:
         "type": pl.String,
     }
     return pl.DataFrame(rows, schema=schema)
+
+
+def _labeled_events(rows: list[dict]) -> pl.DataFrame:
+    schema = {
+        "pull_request_id": pl.Int64,
+        "occurred_at": pl.Datetime("us", "UTC"),
+        "type": pl.String,
+        "label_name": pl.String,
+    }
+    return pl.DataFrame(rows, schema=schema)
+
+
+def _dt_with_sec(day: int, hour: int, minute: int, second: int = 0) -> datetime:
+    return datetime(2025, 1, day, hour, minute, second, tzinfo=timezone.utc)
 
 
 def test_bucket_labels_canonical_form() -> None:
@@ -266,6 +281,152 @@ def test_started_as_draft_no_events_falls_back_to_is_draft() -> None:
     by_id = {r["id"]: r["started_as_draft"] for r in out.iter_rows(named=True)}
     assert by_id[1] is True
     assert by_id[2] is False
+
+
+def test_had_wip_label_at_open_within_default_window() -> None:
+    prs = _prs(
+        [
+            {
+                "id": 1,
+                "author_id": 1.0,
+                "gh_created_at": _dt_with_sec(1, 12, 0),
+                "additions": 0,
+                "deletions": 0,
+                "changed_files_count": 0,
+                "is_draft": "f",
+            },
+        ]
+    )
+    events = _labeled_events(
+        [
+            # WIP applied 30s after PR open → True at the 600s default.
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt_with_sec(1, 12, 0, 30),
+                "type": "LABELED",
+                "label_name": "WIP",
+            },
+        ]
+    )
+    out = had_wip_label_at_open(prs, events)
+    assert out.row(0, named=True)["had_wip_label_at_open"] is True
+
+
+def test_had_wip_label_at_open_outside_default_window() -> None:
+    prs = _prs(
+        [
+            {
+                "id": 1,
+                "author_id": 1.0,
+                "gh_created_at": _dt_with_sec(1, 12, 0),
+                "additions": 0,
+                "deletions": 0,
+                "changed_files_count": 0,
+                "is_draft": "f",
+            },
+        ]
+    )
+    events = _labeled_events(
+        [
+            # WIP applied 2 hours after open → False at the 600s default.
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt_with_sec(1, 14, 0),
+                "type": "LABELED",
+                "label_name": "WIP",
+            },
+        ]
+    )
+    out = had_wip_label_at_open(prs, events)
+    assert out.row(0, named=True)["had_wip_label_at_open"] is False
+    # Widening the window past the gap flips the predicate.
+    out_wide = had_wip_label_at_open(prs, events, open_window_seconds=3 * 3600)
+    assert out_wide.row(0, named=True)["had_wip_label_at_open"] is True
+
+
+def test_had_wip_label_at_open_uses_first_labeled_event() -> None:
+    """A LABELED → UNLABELED → LABELED cycle on the same PR should anchor
+    on the *earliest* LABELED, not the later re-application."""
+    prs = _prs(
+        [
+            {
+                "id": 1,
+                "author_id": 1.0,
+                "gh_created_at": _dt_with_sec(1, 12, 0),
+                "additions": 0,
+                "deletions": 0,
+                "changed_files_count": 0,
+                "is_draft": "f",
+            },
+        ]
+    )
+    events = _labeled_events(
+        [
+            # Early apply within the window.
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt_with_sec(1, 12, 1),
+                "type": "LABELED",
+                "label_name": "WIP",
+            },
+            # Late re-apply far outside the window.
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt_with_sec(2, 12, 0),
+                "type": "LABELED",
+                "label_name": "WIP",
+            },
+        ]
+    )
+    out = had_wip_label_at_open(prs, events)
+    assert out.row(0, named=True)["had_wip_label_at_open"] is True
+
+
+def test_had_wip_label_at_open_no_events_is_false() -> None:
+    prs = _prs(
+        [
+            {
+                "id": 1,
+                "author_id": 1.0,
+                "gh_created_at": _dt_with_sec(1, 12, 0),
+                "additions": 0,
+                "deletions": 0,
+                "changed_files_count": 0,
+                "is_draft": "f",
+            },
+        ]
+    )
+    out = had_wip_label_at_open(prs, _labeled_events([]))
+    assert out.row(0, named=True)["had_wip_label_at_open"] is False
+
+
+def test_had_wip_label_at_open_ignores_other_labels() -> None:
+    prs = _prs(
+        [
+            {
+                "id": 1,
+                "author_id": 1.0,
+                "gh_created_at": _dt_with_sec(1, 12, 0),
+                "additions": 0,
+                "deletions": 0,
+                "changed_files_count": 0,
+                "is_draft": "f",
+            },
+        ]
+    )
+    events = _labeled_events(
+        [
+            # Different label applied at open shouldn't count.
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt_with_sec(1, 12, 0, 5),
+                "type": "LABELED",
+                "label_name": "awaiting-review",
+            },
+        ]
+    )
+    out = had_wip_label_at_open(prs, events)
+    assert out.row(0, named=True)["had_wip_label_at_open"] is False
 
 
 def _titled_prs(rows: list[tuple[int, str | None]]) -> pl.DataFrame:

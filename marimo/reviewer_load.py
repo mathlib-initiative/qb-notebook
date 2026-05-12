@@ -244,6 +244,70 @@ def _(plt, rolling_days, rolling_signoff):
 
 
 @app.cell
+def _(pl, rolling_days, rolling_distinct_actors, signoff_attr, teams):
+    """Same trailing-window distinct-reviewer count, split three ways by
+    team membership so "is the bench growing or shrinking" can be read
+    per tier (maintainer-team / reviewer-team / other contributors)."""
+    if teams is None:
+        rolling_by_team = None
+    else:
+        _maint = teams.maintainers
+        _rev = teams.reviewers
+        _signoff_human = signoff_attr.filter(pl.col("attributed")).select(
+            [pl.col("label_at").alias("at"), pl.col("inferred_actor").alias("actor")]
+        )
+        _classified = _signoff_human.with_columns(
+            pl.col("actor")
+            .str.to_lowercase()
+            .map_elements(
+                lambda a: "maintainer"
+                if a in _maint
+                else ("reviewer" if a in _rev else "other"),
+                return_dtype=str,
+            )
+            .alias("team")
+        )
+        _per_team = {}
+        for _team in ("maintainer", "reviewer", "other"):
+            _sub = _classified.filter(pl.col("team") == _team).select(["at", "actor"])
+            _per_team[_team] = rolling_distinct_actors(_sub, int(rolling_days.value))
+        rolling_by_team = _per_team
+    return (rolling_by_team,)
+
+
+@app.cell
+def _(mo, plt, rolling_by_team, rolling_days):
+    if rolling_by_team is None:
+        rolling_team_view = mo.md(
+            "_Team snapshot unavailable — skipping per-team active-reviewer chart._"
+        )
+    else:
+        _team_colors = {"maintainer": "#3a6", "reviewer": "#6aa3d8", "other": "#888"}
+        _fig, _ax = plt.subplots(figsize=(10, 4))
+        for _team, _df in rolling_by_team.items():
+            if _df.height == 0:
+                continue
+            _ax.plot(
+                _df["day"].to_numpy(),
+                _df["actors"].to_numpy(),
+                color=_team_colors[_team],
+                label=_team,
+            )
+        _ax.set_title(
+            f"Active reviewers by team — distinct attributed in trailing "
+            f"{int(rolling_days.value)}d window"
+        )
+        _ax.set_xlabel("Date")
+        _ax.set_ylabel("Distinct reviewers")
+        _ax.legend(title="Team", loc="upper left", fontsize=8)
+        _ax.grid(True, alpha=0.3)
+        _fig.tight_layout()
+        rolling_team_view = _fig
+    rolling_team_view
+    return
+
+
+@app.cell
 def _(mo):
     mo.md("""
     ## 2. Per-reviewer counts
