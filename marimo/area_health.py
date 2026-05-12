@@ -50,6 +50,7 @@ def _():
         labels_active_at,
         reviewers_court_intervals,
     )
+    from qb_notebook.teams import load as load_teams
 
     return (
         Path,
@@ -59,6 +60,7 @@ def _():
         label_overlap_seconds,
         labels_active_at,
         load_pr_interval_data,
+        load_teams,
         merged_prs_frame,
         np,
         pl,
@@ -80,6 +82,33 @@ def _(Path, datetime, load_pr_interval_data, timezone):
     queue_windows = data["queue_windows"]
     asof = datetime.now(tz=timezone.utc)
     return asof, events, label_defs, prlabel, prs, queue_windows
+
+
+@app.cell
+def _(Path, load_teams, mo):
+    """Optional team-membership overlay used by the reviewer × area matrix
+    below. Falls through gracefully if the sibling
+    `leanprover-community.github.io` checkout is missing."""
+    _candidate = Path(__file__).resolve().parents[2] / "leanprover-community.github.io"
+    if _candidate.exists():
+        teams = load_teams(_candidate, warn_on_unmatched=False)
+        teams_status = mo.md(
+            f"Loaded teams from `{_candidate}` — "
+            f"{len(teams.reviewers)} reviewers, "
+            f"{len(teams.maintainers)} maintainers, "
+            f"{len(teams.unmatched)} unmatched."
+        )
+    else:
+        teams = None
+        teams_status = mo.callout(
+            mo.md(
+                f"Sibling checkout `{_candidate}` not found — "
+                "team-membership overlays disabled."
+            ),
+            kind="warn",
+        )
+    teams_status
+    return (teams,)
 
 
 @app.cell
@@ -458,10 +487,13 @@ def _(active_30d, mo):
 
 
 @app.cell
-def _(np, pl, plt, reviewer_area):
+def _(np, pl, plt, reviewer_area, teams):
     """Top-15 areas × top-20 reviewers (count of attributed `maintainer-merge`
     triggers all-time). PRs with no `t-*` label at trigger time are excluded
-    by construction (no row out of `labels_active_at`)."""
+    by construction (no row out of `labels_active_at`). When the team
+    snapshot is available, y-tick labels are colored by team membership
+    (maintainer / reviewer / other), mirroring the bar coloring in
+    `reviewer_load.py`."""
     _top_areas = (
         reviewer_area.group_by("area")
         .agg(pl.len().alias("n"))
@@ -495,8 +527,69 @@ def _(np, pl, plt, reviewer_area):
     _ax.set_xticks(np.arange(len(_top_areas)), _top_areas, rotation=60, ha="right")
     _ax.set_title("Top reviewers × top areas (color = log1p(triggers all-time))")
     _fig.colorbar(_im, ax=_ax, label="log1p(triggers)")
+    if teams is not None:
+        _team_colors = {"maintainer": "#3a6", "reviewer": "#6aa3d8", "other": "#888"}
+        _maint = teams.maintainers
+        _rev = teams.reviewers
+        for _tick, _name in zip(_ax.get_yticklabels(), _top_reviewers):
+            _login = _name.lower()
+            _team = (
+                "maintainer"
+                if _login in _maint
+                else ("reviewer" if _login in _rev else "other")
+            )
+            _tick.set_color(_team_colors[_team])
+        _handles = [
+            plt.Line2D([0], [0], marker="s", color="w", markerfacecolor=_c, label=_t)
+            for _t, _c in _team_colors.items()
+        ]
+        _ax.legend(handles=_handles, loc="upper right", fontsize=8, title="Team")
     _fig.tight_layout()
     _fig
+    return
+
+
+@app.cell
+def _(mo, pl, reviewer_area, teams):
+    """Per-area team-coverage breakdown: distinct attributed
+    `maintainer-merge` trigger actors per area, split into
+    maintainer-team / reviewer-team / other contributors. Skipped when
+    the team snapshot isn't available."""
+    if teams is None:
+        area_team_coverage = mo.md(
+            "_Team snapshot unavailable — skipping per-area team coverage table._"
+        )
+    else:
+        _maint = teams.maintainers
+        _rev = teams.reviewers
+        _classified = reviewer_area.with_columns(
+            pl.col("reviewer")
+            .str.to_lowercase()
+            .map_elements(
+                lambda a: "maintainer"
+                if a in _maint
+                else ("reviewer" if a in _rev else "other"),
+                return_dtype=str,
+            )
+            .alias("team")
+        )
+        _pivot = (
+            _classified.group_by(["area", "team"])
+            .agg(pl.col("reviewer").n_unique().alias("reviewers"))
+            .pivot(on="team", index="area", values="reviewers")
+            .fill_null(0)
+        )
+        # Ensure all three team columns exist even if a team is absent
+        # from the data (e.g. no "other" contributors in any area).
+        _missing = [
+            t for t in ("maintainer", "reviewer", "other") if t not in _pivot.columns
+        ]
+        if _missing:
+            _pivot = _pivot.with_columns([pl.lit(0).alias(t) for t in _missing])
+        area_team_coverage = _pivot.select(
+            ["area", "maintainer", "reviewer", "other"]
+        ).sort("maintainer", descending=True)
+    area_team_coverage
     return
 
 
@@ -608,7 +701,13 @@ def _(mo):
       time — they're invisible to per-area throughput. The plot above
       is therefore a lower bound on total area work.
     - The bipartite matrix uses *attributed* trigger counts, not raw
-      `LABELED` actor — the bots are excluded by construction.
+      `LABELED` actor — the bots are excluded by construction. Y-tick
+      labels are colored by team membership when the sibling
+      `leanprover-community.github.io` checkout is present
+      (maintainer = green, reviewer = blue, other = grey); the
+      per-area team-coverage table below the matrix breaks out how
+      many distinct reviewers from each tier have triggered a sign-off
+      in that area all-time.
     - "Reviewer-court latency by area" filters to area applications
       whose interval overlaps the last 2 years to keep numbers
       representative of the current process.

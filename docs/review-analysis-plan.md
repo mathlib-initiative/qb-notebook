@@ -312,10 +312,11 @@ trigger time for reviewer activity — via
   flagged.
 
 **Data**: `prs`, `prlabel`, `label_defs` (filtered to `t-*`), `events`,
-`queue_windows`. Team-membership YAML is not currently consumed — the
-attribution heuristic is shared with Theme 2 and exposes the human
-trigger directly; a follow-up could overlay team labels on the
-reviewer × area matrix.
+`queue_windows`. Team-membership YAML is consumed in the reviewer ×
+area matrix (Session 7 follow-up): y-tick labels are colored by team
+and a per-area maintainer / reviewer / other coverage table is
+rendered below the matrix. The attribution heuristic itself is shared
+with Theme 2 and exposes the human trigger directly.
 
 **Output**: `marimo/area_health.py` +
 `qb_notebook.review_states.labels_active_at` (reused by future themes
@@ -568,14 +569,22 @@ its own `sys.path` entry — a helper inside `qb_notebook` would not be
 reachable until after. Flipping `package = true` and editable-installing
 is a bigger architectural change tracked separately.
 
-### Theme-4 follow-up: team-annotated reviewer × area matrix (Session 7)
+### Theme-4 follow-up: team-annotated reviewer × area matrix (Session 7) — shipped
 
-Theme 4 implementation notes (above) already flag this as a follow-up.
-The bipartite reviewer × area matrix in `marimo/area_health.py`
-(lines 467–501) renders without team membership. The pattern already
-exists in `marimo/reviewer_load.py` (per-reviewer table + bors-trigger
-table both annotate `_maint` / `_rev` columns via the `teams`
-dataclass); port the same annotation onto the area matrix.
+The bipartite reviewer × area matrix in `marimo/area_health.py` now
+overlays team membership: y-tick labels are colored by team
+(maintainer / reviewer / other) when the sibling
+`leanprover-community.github.io` checkout is present, with a small
+legend in the upper-right. A new per-area team-coverage table below
+the matrix breaks out how many distinct reviewers from each tier have
+triggered a `maintainer-merge` in that area all-time. The
+`teams = load(...)` load cell mirrors the `marimo/reviewer_load.py`
+pattern and falls through gracefully (warn-and-render-empty) if the
+checkout is missing. Empirically on the current artifact the
+maintainer-team count per area ranges 0–17 (`t-algebra` highest, with
+`t-geometric-group-theory` having no maintainer-team triggers at
+all); the `other` column is near-zero, confirming
+`attribute_label_events` cleanly excludes the bots.
 
 ### Cross-cuts: shape and area effects on review state (Session 8)
 
@@ -631,7 +640,7 @@ for the rest.
 | 4       | Theme 4: area health           | `marimo/area_health.py` + `labels_active_at`             | shipped  |
 | 5       | Theme 5: PR shape              | `marimo/pr_shape_effects.py` + `qb_notebook/pr_shape.py` | shipped  |
 | 6       | Cleanup: boilerplate           | `merged_prs_frame`, label/window constants, `expr_is_draft` fix | planned |
-| 7       | Theme 4: team × area matrix    | team annotation on reviewer × area matrix in `area_health.py` | planned |
+| 7       | Theme 4: team × area matrix    | team annotation on reviewer × area matrix in `area_health.py` | shipped |
 | 8       | Cross-cuts: shape × area       | Theme 1/3 sojourn & stall signals × `pr_type`/`lines_bucket`/area | planned |
 | 9       | Theme 2/5: tier + WIP follow-ups | active-reviewer trend split by team; `had_wip_label_at_open` cut | planned |
 | 10      | Plot site polish               | promote best plots from each notebook                    | planned  |
