@@ -589,20 +589,62 @@ all); the `other` column is near-zero, confirming
 ### Cross-cuts: shape and area effects on review state (Session 8)
 
 Earlier themes ran before `pr_shape` and `labels_active_at` shipped.
-Adding facets:
+Session 8 retrofits those helpers back into Themes 1 and 3 by
+decorating each notebook's per-PR frame once at the top, then adding
+faceted sections that don't disturb the existing plots.
 
-- **Theme 1 sojourn × shape**: `review_state_machine.py` /
-  `queue_window_state.py` sojourn distributions and ping-pong counts
-  faceted by `pr_type` and `lines_bucket`. Does `feat:` ping-pong more
-  than `chore:`? Are 1000+-line PRs in `awaiting-review` longer?
-- **Theme 3 stall signals × area**: `bottleneck_localization.py`
-  `had_merge_conflict` / `had_awaiting_author` / `had_awaiting_CI`
-  prevalence broken down by area (via `labels_active_at(t_intervals,
-  approved_window_starts)`). Are merge-conflicts disproportionate in
-  any single `t-*` area?
-- **Theme 3 stall signals × shape**: same signals broken down by
-  `pr_type` and `lines_bucket`. A 1000+-line `feat:` likely has very
-  different stall-prevalence than a 1-line `chore:`.
+**Shared decorator pattern** (mirrors `marimo/pr_shape_effects.py`):
+join `lines_bucket` and `pr_type` onto the per-PR analysis frame via
+`size_buckets(prs)` / `pr_type(prs)`, then group-by in the new cells.
+No new helper functions needed — everything wires up from existing
+`qb_notebook/pr_shape.py` and `qb_notebook.review_states`.
+
+- **Theme 1 sojourn × shape**:
+  `marimo/review_state_machine.py` and `marimo/queue_window_state.py`.
+  Decorate the `intervals` frame with `lines_bucket` / `pr_type`
+  (left-join on `pull_request_id`). New cells:
+  - Sojourn boxplot by `lines_bucket`, one panel per state label
+    (label-based notebook) or one panel total (queue-window
+    companion).
+  - Sojourn boxplot by `pr_type` (canonical types only, drop
+    `unparsed` to keep the axis readable).
+  - Ping-pong cycle-count distribution by `lines_bucket` and by
+    `pr_type` — same shape as the existing ping-pong histogram cell,
+    just grouped. For the queue-window notebook this is
+    `max(cycle_index) per PR` instead of label cycles.
+  Questions the cuts should answer: does `feat:` ping-pong more than
+  `chore:`? Are 1000+-line PRs in `awaiting-review` longer? Open the
+  notebook to the relevant cell at end of session and record headline
+  numbers in the notes block (same convention as Sessions 5/9).
+- **Theme 3 stall signals × shape**:
+  `marimo/bottleneck_localization.py`. Decorate the `first_mm` /
+  `flags` join with `lines_bucket` and `pr_type`. New cells:
+  - Stall-signal prevalence table by `lines_bucket` (rows = size
+    bucket, columns = `had_merge_conflict` / `had_awaiting_author` /
+    `had_awaiting_CI` / `had_ready_to_merge`, cells = prevalence %
+    + n).
+  - Same table by `pr_type`.
+  - Approved-to-merge latency boxplot faceted by `lines_bucket`
+    (existing latency cell repeated with a group-by).
+- **Theme 3 stall signals × area**:
+  Continuing in `marimo/bottleneck_localization.py`. Reconstruct
+  `t_intervals` via `label_intervals(events, t_label)` for the 24
+  `t-*` labels (same as `area_health.py`), then attribute each
+  `first_mm_at` point to its active areas with
+  `labels_active_at(t_intervals, first_mm_pts)`. PRs with multiple
+  active `t-*` labels contribute to each — same count-each semantics
+  as Theme 4. New cells:
+  - Stall-signal prevalence × area table (areas as rows, signals as
+    columns, sorted by total approved-PR volume).
+  - Per-area median / p90 `mm_to_merge_days` (conditional latency
+    table — drop areas with n < 20 from the headline).
+  Expected output: surface whether merge-conflicts cluster in any
+  `t-*` area (analysis-heavy areas like `t-algebra` vs. infrastructure
+  areas like `t-meta`).
+
+**Out of scope for Session 8**: extending `area_health.py` with shape
+cuts. Area × shape is a natural next step but doubles the surface; if
+the Session 8 findings make it interesting, spin out as Session 8b.
 
 ### Theme-2 active-reviewer trend × team (Session 9) — shipped
 
@@ -667,7 +709,7 @@ for the rest.
 | 3.5     | Theme 1 companion (queue)      | `marimo/queue_window_state.py` + `queue_window_intervals`| shipped  |
 | 4       | Theme 4: area health           | `marimo/area_health.py` + `labels_active_at`             | shipped  |
 | 5       | Theme 5: PR shape              | `marimo/pr_shape_effects.py` + `qb_notebook/pr_shape.py` | shipped  |
-| 6       | Cleanup: boilerplate           | `merged_prs_frame`, label/window constants, `expr_is_draft` fix | planned |
+| 6       | Cleanup: boilerplate           | `merged_prs_frame`, label/window constants, `expr_is_draft` fix | shipped |
 | 7       | Theme 4: team × area matrix    | team annotation on reviewer × area matrix in `area_health.py` | shipped |
 | 8       | Cross-cuts: shape × area       | Theme 1/3 sojourn & stall signals × `pr_type`/`lines_bucket`/area | planned |
 | 9       | Theme 2/5: tier + WIP follow-ups | active-reviewer trend split by team; `had_wip_label_at_open` cut | shipped |
