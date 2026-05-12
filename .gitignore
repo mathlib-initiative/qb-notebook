@@ -6,3 +6,4 @@ __pycache__/
 .DS_Store
 data/
 analytics-datasets.zip
+__marimo__/

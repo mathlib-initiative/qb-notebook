@@ -12,7 +12,8 @@ This file gives coding agents repo-specific guidance for `qb-notebook`.
   (see "Upstream data source" below).
 - Main usage modes:
   - library-style helpers (`qb_notebook.data_io`, `qb_notebook.filters`,
-    `qb_notebook.intervals`, `qb_notebook.plotting`)
+    `qb_notebook.intervals`, `qb_notebook.plotting`,
+    `qb_notebook.review_states`)
   - notebook exploration:
     - Jupyter (`.ipynb`): `pr_merge_throughput`, `pr_open_durations`,
       `queue_windows`
