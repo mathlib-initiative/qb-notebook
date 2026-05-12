@@ -358,29 +358,86 @@ Theme 5 for size buckets per area).
 
 ### Theme 5 — PR-shape effects (size, author type)
 
-**Status: planned.**
+**Status: shipped (`marimo/pr_shape_effects.py`, `qb_notebook/pr_shape.py`).**
 
 **Question**: Do bigger PRs take disproportionately longer? Do
 first-time contributors wait longer?
 
+**Attribution model**: per-PR shape attributes are precomputed once into
+a single `prs`-shaped frame via three helpers in `qb_notebook/pr_shape.py`:
+
+- `size_buckets(df_prs)` — adds `lines_changed`, `lines_bucket`
+  (default breaks `(10, 50, 200, 1000)`), `files_bucket` (default
+  `(1, 3, 10, 30)`).
+- `author_cohort(df_prs)` — adds `author_first_pr_at`,
+  `author_pr_seq` (1-indexed), `is_first_pr`. Null `author_id` gets
+  null cohort columns.
+- `started_as_draft(df_prs, df_events)` — first
+  `READY_FOR_REVIEW`/`CONVERT_TO_DRAFT` event determines initial state;
+  PRs with no draft events fall back to the current `prs.is_draft`
+  snapshot to catch drafts that never marked ready.
+
+All four sub-analyses share the same per-PR row so cuts are directly
+comparable.
+
 **Plots / metrics**:
 
-- Size buckets (`additions + deletions`, `changed_files_count`) vs
-  median time-to-first-reviewer-court-exit (use
-  `reviewers_court_intervals` so the metric survives the
-  `awaiting-review` retirement) and time-to-merge. Box plots by bucket.
-- First-time vs returning contributors (first-seen `author_id` in
-  `syncer_pullrequest`): merge-time distributions, ratio of PRs reviewed,
-  ratio merged vs abandoned.
-- Author → reviewer concentration: do new authors get reviewed by a
-  narrow subset of reviewers?
-- Effect of `WIP`/draft start: do PRs that begin as drafts merge faster
-  or slower than ones that don't?
+- Size × TTM and size × time-to-first-reviewer-court-exit box plots
+  by `lines_bucket` (and a per-bucket summary by `files_bucket`).
+  Empirical: median TTM scales 0.4d → 1.5d → 3.6d → 4.4d → 2.4d
+  across `lines_bucket`; the 1001+ bucket is faster than 201-1000,
+  consistent with the long tail being large-but-easy refactor PRs
+  that get fast-tracked.
+- First-time vs returning contributor funnel: merged / abandoned /
+  open / reviewed rates per cohort, plus a TTM-CDF overlay and a
+  `author_pr_seq` bucket table (1 / 2-5 / 6-20 / 21+). Empirical:
+  first-time merge-rate 57.5 % vs returning 82.0 %; first-time
+  reviewed-rate (got `maintainer-merge`) 16.7 % vs returning 21.5 %.
+- Author → reviewer concentration: Lorenz curve + Gini of attributed
+  `maintainer-merge` triggers, first-time vs returning author cohorts.
+  Empirical on current artifact: 49 distinct reviewers cover the
+  returning-author cohort vs 28 for first-time-authors — a real
+  "newcomer reviewer bench" pattern (plus a top-15 table of who
+  reviews first-time-author PRs).
+- Draft start: outcome funnel + TTM-CDF + percentile table by
+  `started_as_draft`. Empirical: started-as-draft merge-rate 48 %
+  (vs 83 % non-draft), median TTM 6.2d (vs 1.7d), p90 67d (vs 31d).
+  Drafts are dramatically slower and less likely to merge.
 
-**Data**: `prs`, `events`, `prlabel`.
+**Data**: `prs`, `events`, `queue_windows` (ruleset 3 via
+`reviewers_court_intervals`). Team-membership YAML not consumed in this
+first cut.
 
-**Output**: `pr_shape_effects.ipynb`. Probably no plot-site additions
-unless a clear top-level chart emerges.
+**Output**: `marimo/pr_shape_effects.py` + `qb_notebook/pr_shape.py`
+(reused wherever shape cuts come up later — e.g. plot-site polish for
+Session 6).
+
+**Notes from implementation**:
+
+- `prs.is_draft` arrives as a Postgres `t`/`f` string in the parquet
+  export, not a real bool — the helper takes `draft_true="t"` to make
+  this explicit and overridable. The existing `filters.expr_is_draft`
+  compares to `True` (Bool), which silently mismatches the String
+  column; not fixed here since nothing in the codebase actually calls
+  it on real data, but worth a follow-up.
+- "First-time" author is keyed off the dataset snapshot, not the
+  GitHub-wide history. An author whose first mathlib4 PR was in 2021
+  is "returning" on their 2025 PR; an author whose first ever PR is
+  in this artifact is "first-time" even if they have years of OSS
+  history elsewhere.
+- The author-sequence bin (`1`, `2-5`, `6-20`, `21+`) is the closest
+  thing to "early-career-in-mathlib4". Use it instead of
+  `is_first_pr` for a smoother trend across the first 20 PRs rather
+  than the binary first-vs-rest split.
+- Time-to-first-court-exit excludes PRs whose first court interval
+  is still open at `asof` so the metric stays well defined. Bigger
+  PRs have proportionally more open first intervals than smaller
+  ones; the box-plot Ns reflect that selection.
+- The `WIP` label start was in the original Theme 5 plan but is not
+  broken out separately here — `WIP` is a mathlib4-specific workflow
+  signal rather than a GitHub state and overlaps heavily with draft
+  in practice. Adding a third draft-history category that distinguishes
+  draft vs WIP vs both would be a follow-up.
 
 ---
 
@@ -429,8 +486,17 @@ These keep showing up in multiple themes and should be implemented once:
   `label_asof` parameter clamps label-source intervals to a retirement
   date (mathlib: `datetime(2024, 7, 10, UTC)`) since label deletion
   doesn't emit `UNLABELED` events. Lives in
-  `qb_notebook/review_states.py`. To be reused by Themes 2, 4, and
-  5. ✅ shipped.
+  `qb_notebook/review_states.py`. Reused by Themes 2, 4, and 5.
+  ✅ shipped.
+- **PR-shape helpers in `qb_notebook/pr_shape.py`** —
+  `size_buckets(df_prs)` adds `lines_changed` / `lines_bucket` /
+  `files_bucket`; `author_cohort(df_prs)` adds `author_first_pr_at` /
+  `author_pr_seq` / `is_first_pr`; `started_as_draft(df_prs, df_events)`
+  adds `started_as_draft` from `READY_FOR_REVIEW`/`CONVERT_TO_DRAFT`
+  events with `is_draft` snapshot fallback. `bucket_labels(breaks)`
+  exposes the canonical label ordering for plot axes. Used by Theme 5;
+  ready for plot-site polish (Session 6) wherever shape cuts come up.
+  ✅ shipped.
 
 A nice-to-have upstream change: an explicit `queueboard-core`
 ruleset preserving the original `awaiting-review` semantics, so the
@@ -446,7 +512,7 @@ code.
 | 3       | Theme 3: bottlenecks           | `marimo/bottleneck_localization.py`                      | shipped  |
 | 3.5     | Theme 1 companion (queue)      | `marimo/queue_window_state.py` + `queue_window_intervals`| shipped  |
 | 4       | Theme 4: area health           | `marimo/area_health.py` + `labels_active_at`             | shipped  |
-| 5       | Theme 5: PR shape              | `pr_shape_effects.ipynb`                                 | planned  |
+| 5       | Theme 5: PR shape              | `marimo/pr_shape_effects.py` + `qb_notebook/pr_shape.py` | shipped  |
 | 6       | Plot site polish               | promote best plots from each notebook                    | planned  |
 
 Order is flexible — Themes 1 and 2 are the highest-value starting points.
