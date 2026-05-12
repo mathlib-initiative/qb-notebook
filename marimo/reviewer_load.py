@@ -550,7 +550,7 @@ def _(mo, per_bors, pl, teams):
 def _(asof, mo, window_minutes):
     mo.md(f"""
     _Attribution window: {int(window_minutes.value)} minutes. "
-        f"Data asof {asof.isoformat(timespec='seconds')}._
+        f"Data asof {asof.isoformat(timespec="seconds")}._
     """)
     return
 
