@@ -173,31 +173,67 @@ themes that need to credit bot-applied labels).
 
 ### Theme 3 — Bottleneck localization
 
-**Status: planned.**
+**Status: shipped (`marimo/bottleneck_localization.py`,
+`qb_notebook.review_states.label_overlap_seconds`).**
 
 **Question**: Once a PR is approved, why doesn't it merge immediately?
 Where does the tail of "approved but not merged" latency come from?
 
+**Approach**: For each merged-to-master PR that ever got
+`maintainer-merge`, define the *approved window* as
+`[first_maintainer_merge, merged_at_effective]`. Within that window,
+flag overlap with the stall labels (`merge-conflict`, `awaiting-CI`,
+`awaiting-author`, `ready-to-merge`) using
+`label_overlap_seconds(intervals, windows)` — a generic per-PR
+interval-window overlap helper added to `qb_notebook.review_states`.
+Join in `analyzer_prqueuewindow.cycle_index` (ruleset 3) to get the
+bors-queue bounce count per PR.
+
 **Plots / metrics**:
 
-- `maintainer-merge` → `merged_at` latency distribution. Split by:
-  whether `ready-to-merge` was applied, whether CI failed in between,
-  whether `merge-conflict` appeared.
-- Queue-bounce rate: per PR, number of times it entered and exited the
-  queue (via existing `analyzer_prqueuewindow.cycle_index`).
-- Top reasons a queue window closed (already partly in `queue_windows.ipynb`
-  via `closed_by_event_type`) — broken down by time period to spot
-  regressions.
-- For approved-but-unmerged PRs currently open: histogram of age since
-  `maintainer-merge` and which stall labels they carry.
-- CI-related stalls: distribution of time spent with a `awaiting-CI` or
-  failing `head_ci_state`.
+- Approved-to-merge cohort summary: median / p75 / p90 / p99 of
+  `mm → merge`. Empirical baseline on the current artifact: ~0.35d
+  median, 4.3d p90, 30d p99.
+- Signal prevalence + conditional latency table. `had_merge_conflict`
+  shifts the median from 0.32d → 4.6d (≈14×), `had_awaiting_author`
+  from 0.29d → 2.7d (≈9×), `had_awaiting_CI` from 0.34d → 0.80d
+  (≈2.4×). Roughly 87 % of approved PRs make it into the bors queue
+  at least once.
+- Approved-to-merge histogram (≤14d) + long-tail summary.
+- Queue-bounce-rate bar chart over `cycle_index + 1`, plus a
+  per-bucket latency table.
+- Queue close-reason stacked-share over time
+  (`closed_by_event_type` monthly). Picks up shifts like CI_FAILED
+  vs FORBIDDEN_LABEL_ADDED dominance.
+- Currently-stuck approved-but-unmerged PRs: per-PR table of age
+  since `maintainer-merge`, current `head_ci_state`, and which stall
+  labels are still applied.
+- `awaiting-CI` sojourn histogram (closed intervals, ≤72h) +
+  `head_ci_state` snapshot for currently-open PRs.
 
-**Data**: `prs`, `events`, `queue_windows`, `check_runs`, `status_contexts`.
+**Data**: `prs`, `events`, `queue_windows` (ruleset 3). No need for
+`check_runs` / `status_contexts` at this granularity — the label
+intervals already cover the CI-stall signal.
 
-**Output**: `bottleneck_localization.ipynb`. May extend
-`qb_notebook/intervals.py` with `time_in_label` helpers (overlaps with
-Theme 1 helpers — implement once, reuse).
+**Output**: `marimo/bottleneck_localization.py` +
+`qb_notebook.review_states.label_overlap_seconds` (reusable by
+Theme 4 / Theme 5 for any "did label X overlap interval Y" question).
+
+**Notes from implementation**:
+
+- The `awaiting-review` label that earlier drafts of this plan
+  assumed doesn't actually exist on the mathlib4 repo — Theme 1's
+  `awaiting-review` track silently aggregates zero intervals. The
+  "in reviewers' court" state is implicit (PR is open + not
+  `awaiting-author` / `WIP`). Worth a follow-up cleanup in the plan
+  and in Theme 1's defaults.
+- ~3 % of cohort PRs are filtered out by `mm_to_merge_days < 0` —
+  these are the cases where `maintainer-merge` was (re)applied
+  *after* the bors merge, typically as part of a maintainer
+  cleanup. Two PRs total had negative gaps in the current data.
+- The "approved window" picks the *first* `maintainer-merge`
+  application. Multiple applications after force-push are not
+  treated as resetting the clock.
 
 ---
 
@@ -261,8 +297,15 @@ These keep showing up in multiple themes and should be implemented once:
 
 - **`label_intervals(events, pr_id, label_name) -> [(start, end, actor)]`** —
   reconstruct intervals when a label was applied, including actor on
-  apply/remove. Belongs in `qb_notebook/intervals.py` or a new
-  `review_states.py`. Used by Themes 1, 3, 4, 5.
+  apply/remove. Lives in `qb_notebook/review_states.py`. Used by
+  Themes 1, 3, 4, 5. ✅ shipped.
+- **`label_overlap_seconds(intervals, windows) -> windows + overlap_seconds + had_overlap`** —
+  generic per-PR interval-vs-window overlap. Given the output of
+  `label_intervals` for one label and a per-PR window frame, sums
+  intersections in seconds and adds a `had_overlap` flag. Lives in
+  `qb_notebook/review_states.py`. Used by Theme 3; ready for Themes
+  4 / 5 wherever a "did label X happen during interval Y" question
+  comes up. ✅ shipped.
 - **`teams.load(repo_path) -> {reviewers, maintainers, admins, ...: set[login]}`** —
   parse `data/people.yaml` + `data/teams.yaml` from a checkout of
   `leanprover-community.github.io` and return sets of GitHub logins per
@@ -281,7 +324,7 @@ These keep showing up in multiple themes and should be implemented once:
 | ------- | ------------------------------ | -------------------------------------------------------- | -------- |
 | 1       | Theme 1: state machine         | `marimo/review_state_machine.py` + `review_states.py`    | shipped  |
 | 2       | Theme 2: reviewer load         | `marimo/reviewer_load.py` + `qb_notebook/teams.py`       | shipped  |
-| 3       | Theme 3: bottlenecks           | `bottleneck_localization.ipynb`                          | planned  |
+| 3       | Theme 3: bottlenecks           | `marimo/bottleneck_localization.py`                      | shipped  |
 | 4       | Theme 4: area health           | `area_health.ipynb`                                      | planned  |
 | 5       | Theme 5: PR shape              | `pr_shape_effects.ipynb`                                 | planned  |
 | 6       | Plot site polish               | promote best plots from each notebook                    | planned  |

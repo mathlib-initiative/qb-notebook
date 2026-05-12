@@ -338,3 +338,77 @@ def attribute_label_events(
             ]
         )
     )
+
+
+def label_overlap_seconds(
+    df_intervals: pl.DataFrame,
+    df_windows: pl.DataFrame,
+    *,
+    interval_pr_col: str = "pull_request_id",
+    interval_start_col: str = "start",
+    interval_end_col: str = "end_effective",
+    window_pr_col: str = "pull_request_id",
+    window_start_col: str = "window_start",
+    window_end_col: str = "window_end",
+    overlap_col: str = "overlap_seconds",
+    had_overlap_col: str = "had_overlap",
+) -> pl.DataFrame:
+    """Sum interval-window overlap seconds per row of ``df_windows``.
+
+    ``df_intervals`` carries zero or more intervals per ``pull_request_id``
+    (typically the output of :func:`label_intervals` for a single label,
+    using ``end_effective`` so open intervals are closed at ``asof``).
+    ``df_windows`` has one row per (PR, window) pair with non-null
+    ``window_start`` and ``window_end``.
+
+    For each window row, the helper restricts ``df_intervals`` to the same
+    PR, intersects each interval with ``[window_start, window_end]``, and
+    sums the positive intersections in seconds. Rows with no matching
+    interval, or whose intersections are all non-positive, get ``0.0``.
+
+    Returns ``df_windows`` with two added columns: ``overlap_seconds``
+    (float, total overlap in seconds) and ``had_overlap`` (bool,
+    ``overlap_seconds > 0``).
+    """
+    ints = df_intervals.select(
+        [
+            pl.col(interval_pr_col).alias("_pr"),
+            pl.col(interval_start_col).alias("_istart"),
+            pl.col(interval_end_col).alias("_iend"),
+        ]
+    ).drop_nulls(["_pr", "_istart", "_iend"])
+
+    wins_indexed = df_windows.with_row_index("_row_idx")
+    wins = wins_indexed.select(
+        [
+            "_row_idx",
+            pl.col(window_pr_col).alias("_pr"),
+            pl.col(window_start_col).alias("_wstart"),
+            pl.col(window_end_col).alias("_wend"),
+        ]
+    )
+
+    pairs = wins.join(ints, on="_pr", how="inner")
+    overlap = (
+        pairs.with_columns(
+            [
+                pl.max_horizontal("_istart", "_wstart").alias("_lo"),
+                pl.min_horizontal("_iend", "_wend").alias("_hi"),
+            ]
+        )
+        .with_columns(
+            pl.when(pl.col("_hi") > pl.col("_lo"))
+            .then((pl.col("_hi") - pl.col("_lo")).dt.total_seconds().cast(pl.Float64))
+            .otherwise(0.0)
+            .alias("_overlap")
+        )
+        .group_by("_row_idx")
+        .agg(pl.col("_overlap").sum().alias(overlap_col))
+    )
+
+    return (
+        wins_indexed.join(overlap, on="_row_idx", how="left")
+        .with_columns(pl.col(overlap_col).fill_null(0.0))
+        .with_columns((pl.col(overlap_col) > 0).alias(had_overlap_col))
+        .drop("_row_idx")
+    )

@@ -5,6 +5,7 @@ import polars as pl
 from qb_notebook.review_states import (
     attribute_label_events,
     label_intervals,
+    label_overlap_seconds,
     stage_timestamps,
 )
 
@@ -520,6 +521,118 @@ def test_attribute_handles_multiple_label_events_per_pr() -> None:
     )
     assert out.height == 2
     assert out["inferred_actor"].to_list() == ["alice", "bob"]
+
+
+# ---- label_overlap_seconds -------------------------------------------------
+
+
+def _intervals(rows: list[dict]) -> pl.DataFrame:
+    return pl.DataFrame(
+        rows,
+        schema={
+            "pull_request_id": pl.Int64,
+            "start": pl.Datetime("us", "UTC"),
+            "end_effective": pl.Datetime("us", "UTC"),
+        },
+    )
+
+
+def _windows(rows: list[dict]) -> pl.DataFrame:
+    return pl.DataFrame(
+        rows,
+        schema={
+            "pull_request_id": pl.Int64,
+            "window_start": pl.Datetime("us", "UTC"),
+            "window_end": pl.Datetime("us", "UTC"),
+        },
+    )
+
+
+def test_overlap_full_containment() -> None:
+    ivals = _intervals(
+        [{"pull_request_id": 1, "start": _dt(2), "end_effective": _dt(3)}]
+    )
+    wins = _windows(
+        [{"pull_request_id": 1, "window_start": _dt(1), "window_end": _dt(5)}]
+    )
+    out = label_overlap_seconds(ivals, wins)
+    assert out["overlap_seconds"].to_list() == [86400.0]
+    assert out["had_overlap"].to_list() == [True]
+
+
+def test_overlap_partial_left_and_right() -> None:
+    ivals = _intervals(
+        [
+            {"pull_request_id": 1, "start": _dt(1), "end_effective": _dt(3)},
+            {"pull_request_id": 1, "start": _dt(5), "end_effective": _dt(7)},
+        ]
+    )
+    wins = _windows(
+        [{"pull_request_id": 1, "window_start": _dt(2), "window_end": _dt(6)}]
+    )
+    out = label_overlap_seconds(ivals, wins)
+    # First interval contributes [_dt(2), _dt(3)] = 1 day; second contributes
+    # [_dt(5), _dt(6)] = 1 day. Total = 2 days = 172800 s.
+    assert out["overlap_seconds"].to_list() == [172800.0]
+    assert out["had_overlap"].to_list() == [True]
+
+
+def test_overlap_zero_when_disjoint() -> None:
+    ivals = _intervals(
+        [{"pull_request_id": 1, "start": _dt(1), "end_effective": _dt(2)}]
+    )
+    wins = _windows(
+        [{"pull_request_id": 1, "window_start": _dt(5), "window_end": _dt(6)}]
+    )
+    out = label_overlap_seconds(ivals, wins)
+    assert out["overlap_seconds"].to_list() == [0.0]
+    assert out["had_overlap"].to_list() == [False]
+
+
+def test_overlap_no_matching_pr() -> None:
+    ivals = _intervals(
+        [{"pull_request_id": 2, "start": _dt(1), "end_effective": _dt(5)}]
+    )
+    wins = _windows(
+        [{"pull_request_id": 1, "window_start": _dt(2), "window_end": _dt(4)}]
+    )
+    out = label_overlap_seconds(ivals, wins)
+    assert out["overlap_seconds"].to_list() == [0.0]
+    assert out["had_overlap"].to_list() == [False]
+
+
+def test_overlap_preserves_extra_window_columns() -> None:
+    ivals = _intervals(
+        [{"pull_request_id": 1, "start": _dt(2), "end_effective": _dt(3)}]
+    )
+    wins = _windows(
+        [{"pull_request_id": 1, "window_start": _dt(1), "window_end": _dt(5)}]
+    ).with_columns(pl.lit("hello").alias("note"))
+    out = label_overlap_seconds(ivals, wins)
+    assert "note" in out.columns
+    assert out["note"].to_list() == ["hello"]
+
+
+def test_overlap_drops_null_interval_endpoints() -> None:
+    # A row whose start or end is null should be ignored (still-open intervals
+    # are expected to come in as `end_effective` non-null).
+    ivals = pl.DataFrame(
+        {
+            "pull_request_id": [1, 1],
+            "start": [_dt(2), None],
+            "end_effective": [_dt(3), _dt(4)],
+        },
+        schema={
+            "pull_request_id": pl.Int64,
+            "start": pl.Datetime("us", "UTC"),
+            "end_effective": pl.Datetime("us", "UTC"),
+        },
+    )
+    wins = _windows(
+        [{"pull_request_id": 1, "window_start": _dt(1), "window_end": _dt(5)}]
+    )
+    out = label_overlap_seconds(ivals, wins)
+    assert out["overlap_seconds"].to_list() == [86400.0]
 
 
 def test_attribute_returns_empty_when_label_absent() -> None:
