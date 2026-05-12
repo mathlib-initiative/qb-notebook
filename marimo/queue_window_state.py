@@ -86,14 +86,18 @@ def _():
 
 
 @app.cell
-def _(Path, datetime, load_pr_interval_data, timezone):
+def _(Path, datetime, load_pr_interval_data, pl, timezone):
     _data_dir = Path(__file__).resolve().parents[1] / "data"
     data = load_pr_interval_data(_data_dir)
     prs = data["prs"]
     events = data["events"]
     queue_windows_all = data["queue_windows"]
     asof = datetime.now(tz=timezone.utc)
-    return asof, events, prs, queue_windows_all
+    # See `label_intervals` docstring: closes any `awaiting-review`
+    # interval at the PR's close time, since GitHub does not auto-remove
+    # labels on close.
+    pr_close = prs.select(pl.col("id").alias("pull_request_id"), "closed_at")
+    return asof, events, pr_close, prs, queue_windows_all
 
 
 @app.cell
@@ -484,33 +488,53 @@ def _(mo):
 
 
 @app.cell
-def _(asof, datetime, events, intervals_all, label_intervals, pl, timezone):
+def _(
+    asof,
+    datetime,
+    events,
+    intervals_all,
+    label_intervals,
+    pl,
+    pr_close,
+    timezone,
+):
+    """Clamp both source streams to [cohort_start, cohort_end] symmetrically.
+
+    Bug fixes (relative to the original notebook):
+    1. Previously only `end_effective` was clamped (to cohort_end).
+       Intervals that started before cohort_start contributed their full
+       pre-cohort time, inflating per-PR totals and pulling Jaccard down.
+       ~93 `awaiting-review` intervals had this shape; we now clamp
+       `start` to cohort_start symmetrically.
+    2. `label_intervals` now takes `df_pr_close` so open `awaiting-review`
+       intervals on closed PRs end at the PR's close, not at `asof`.
+       GitHub does not auto-remove labels when a PR closes, so without
+       this clamp ~531 phantom open intervals run to `asof`.
+    """
     cohort_start = datetime(2022, 11, 1, tzinfo=timezone.utc)
     cohort_end = datetime(2024, 7, 10, 23, 59, 59, tzinfo=timezone.utc)
 
-    label_ints = (
-        label_intervals(events, "awaiting-review", asof=asof)
-        .filter(pl.col("start") <= cohort_end)
-        .with_columns(
-            pl.min_horizontal(pl.col("end_effective"), pl.lit(cohort_end)).alias(
-                "end_effective"
+    def _clamp_to_cohort(df):
+        return (
+            df.filter(pl.col("start") <= cohort_end)
+            .filter(pl.col("end_effective") >= cohort_start)
+            .with_columns(
+                [
+                    pl.max_horizontal(pl.col("start"), pl.lit(cohort_start)).alias(
+                        "start"
+                    ),
+                    pl.min_horizontal(
+                        pl.col("end_effective"), pl.lit(cohort_end)
+                    ).alias("end_effective"),
+                ]
             )
+            .filter(pl.col("end_effective") > pl.col("start"))
         )
-        .filter(pl.col("end_effective") > pl.col("start"))
-    )
 
-    queue_ints = (
-        intervals_all.filter(pl.col("start") <= cohort_end)
-        .with_columns(
-            pl.min_horizontal(pl.col("end_effective"), pl.lit(cohort_end)).alias(
-                "end_effective"
-            )
-        )
-        .filter(pl.col("end_effective") > pl.col("start"))
-        .filter(pl.col("end_effective") >= cohort_start)
+    label_ints = _clamp_to_cohort(
+        label_intervals(events, "awaiting-review", asof=asof, df_pr_close=pr_close)
     )
-
-    label_ints = label_ints.filter(pl.col("end_effective") >= cohort_start)
+    queue_ints = _clamp_to_cohort(intervals_all)
     return cohort_end, cohort_start, label_ints, queue_ints
 
 

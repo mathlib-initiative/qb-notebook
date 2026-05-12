@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import polars as pl
 
 from qb_notebook.review_states import (
+    MATHLIB_LABEL_RETIRED_AT,
     attribute_label_events,
     label_intervals,
     label_overlap_seconds,
@@ -290,6 +291,239 @@ def test_simultaneous_label_unlabel_ordered_label_first() -> None:
     out = label_intervals(ev, "awaiting-review", asof=_dt(10))
     assert out.height == 1
     assert out.row(0, named=True)["duration_days"] == 0.0
+
+
+def test_label_asof_overrides_closes_retired_label_intervals() -> None:
+    """Open intervals for a retired label clamp at the override; is_open flips."""
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(1),
+                "type": "LABELED",
+                "label_name": "awaiting-review",
+                "actor_login": "alice",
+            },
+        ]
+    )
+    retired = _dt(5)
+    asof = _dt(20)
+    out = label_intervals(
+        ev,
+        "awaiting-review",
+        asof=asof,
+        label_asof_overrides={"awaiting-review": retired},
+    )
+    row = out.row(0, named=True)
+    assert row["is_open"] is False
+    assert row["end"] is None  # No actual UNLABELED event was observed
+    assert row["end_effective"] == retired
+    assert row["duration_days"] == 4.0  # _dt(5) - _dt(1) = 4 days
+
+
+def test_label_asof_overrides_does_not_touch_closed_intervals() -> None:
+    """A label with an UNLABELED event keeps its real `end`, ignoring the override."""
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(1),
+                "type": "LABELED",
+                "label_name": "awaiting-review",
+                "actor_login": "alice",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(3),
+                "type": "UNLABELED",
+                "label_name": "awaiting-review",
+                "actor_login": "alice",
+            },
+        ]
+    )
+    out = label_intervals(
+        ev,
+        "awaiting-review",
+        asof=_dt(20),
+        label_asof_overrides={"awaiting-review": _dt(5)},
+    )
+    row = out.row(0, named=True)
+    assert row["is_open"] is False
+    assert row["end"] == _dt(3)
+    assert row["end_effective"] == _dt(3)
+
+
+def test_label_asof_overrides_only_affects_named_labels() -> None:
+    """An override for label A leaves label B's open intervals alone."""
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(1),
+                "type": "LABELED",
+                "label_name": "awaiting-review",
+                "actor_login": "alice",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(2),
+                "type": "LABELED",
+                "label_name": "WIP",
+                "actor_login": "alice",
+            },
+        ]
+    )
+    out = label_intervals(
+        ev,
+        ["awaiting-review", "WIP"],
+        asof=_dt(20),
+        label_asof_overrides={"awaiting-review": _dt(5)},
+    ).sort("label_name")
+    ar = out.filter(pl.col("label_name") == "awaiting-review").row(0, named=True)
+    wip = out.filter(pl.col("label_name") == "WIP").row(0, named=True)
+    assert ar["is_open"] is False
+    assert ar["end_effective"] == _dt(5)
+    assert wip["is_open"] is True
+    assert wip["end_effective"] == _dt(20)
+
+
+def _pr_close(rows: list[dict]) -> pl.DataFrame:
+    return pl.DataFrame(
+        rows,
+        schema={
+            "pull_request_id": pl.Int64,
+            "closed_at": pl.Datetime("us", "UTC"),
+        },
+    )
+
+
+def test_df_pr_close_clamps_open_interval_at_pr_close() -> None:
+    """An open interval on a closed PR clamps at closed_at and flips is_open."""
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(1),
+                "type": "LABELED",
+                "label_name": "awaiting-review",
+                "actor_login": "alice",
+            },
+        ]
+    )
+    closes = _pr_close([{"pull_request_id": 1, "closed_at": _dt(3)}])
+    out = label_intervals(ev, "awaiting-review", asof=_dt(20), df_pr_close=closes)
+    row = out.row(0, named=True)
+    assert row["is_open"] is False
+    assert row["end"] is None
+    assert row["end_effective"] == _dt(3)
+    assert row["duration_days"] == 2.0
+
+
+def test_df_pr_close_leaves_open_for_still_open_pr() -> None:
+    """A PR with closed_at = null leaves open intervals alone."""
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(1),
+                "type": "LABELED",
+                "label_name": "awaiting-review",
+                "actor_login": "alice",
+            },
+        ]
+    )
+    closes = pl.DataFrame(
+        [{"pull_request_id": 1, "closed_at": None}],
+        schema={
+            "pull_request_id": pl.Int64,
+            "closed_at": pl.Datetime("us", "UTC"),
+        },
+    )
+    out = label_intervals(ev, "awaiting-review", asof=_dt(20), df_pr_close=closes)
+    row = out.row(0, named=True)
+    assert row["is_open"] is True
+    assert row["end_effective"] == _dt(20)
+
+
+def test_df_pr_close_does_not_clamp_labels_applied_after_close() -> None:
+    """A label applied AFTER the PR closed (record-keeping) stays open."""
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(5),
+                "type": "LABELED",
+                "label_name": "maintainer-merge",
+                "actor_login": "alice",
+            },
+        ]
+    )
+    closes = _pr_close([{"pull_request_id": 1, "closed_at": _dt(3)}])
+    out = label_intervals(ev, "maintainer-merge", asof=_dt(20), df_pr_close=closes)
+    row = out.row(0, named=True)
+    # start (_dt(5)) > closed_at (_dt(3)) — clamp predicate fails, stays open.
+    assert row["is_open"] is True
+    assert row["end_effective"] == _dt(20)
+
+
+def test_df_pr_close_does_not_alter_closed_intervals() -> None:
+    """An interval with a real UNLABELED keeps its end regardless of close time."""
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(1),
+                "type": "LABELED",
+                "label_name": "awaiting-review",
+                "actor_login": "alice",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(2),
+                "type": "UNLABELED",
+                "label_name": "awaiting-review",
+                "actor_login": "alice",
+            },
+        ]
+    )
+    closes = _pr_close([{"pull_request_id": 1, "closed_at": _dt(10)}])
+    out = label_intervals(ev, "awaiting-review", asof=_dt(20), df_pr_close=closes)
+    row = out.row(0, named=True)
+    assert row["end"] == _dt(2)
+    assert row["end_effective"] == _dt(2)
+
+
+def test_df_pr_close_takes_min_with_retirement_override() -> None:
+    """If both close-clamp and retirement-override apply, the earlier wins."""
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(1),
+                "type": "LABELED",
+                "label_name": "awaiting-review",
+                "actor_login": "alice",
+            },
+        ]
+    )
+    closes = _pr_close([{"pull_request_id": 1, "closed_at": _dt(8)}])
+    # Retirement at _dt(5) is earlier than close at _dt(8); end_effective should be _dt(5).
+    out = label_intervals(
+        ev,
+        "awaiting-review",
+        asof=_dt(20),
+        label_asof_overrides={"awaiting-review": _dt(5)},
+        df_pr_close=closes,
+    )
+    row = out.row(0, named=True)
+    assert row["is_open"] is False
+    assert row["end_effective"] == _dt(5)
+
+
+def test_mathlib_label_retired_at_includes_awaiting_review() -> None:
+    """Sanity check the exported constant the notebooks import."""
+    assert "awaiting-review" in MATHLIB_LABEL_RETIRED_AT
+    assert MATHLIB_LABEL_RETIRED_AT["awaiting-review"].tzinfo is timezone.utc
 
 
 def test_stage_timestamps_first_application_only() -> None:

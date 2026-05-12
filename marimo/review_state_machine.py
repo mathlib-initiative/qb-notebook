@@ -63,9 +63,14 @@ def _():
 
     from qb_notebook.data_io import load_pr_interval_data
     from qb_notebook.filters import expr_merged_at_effective, expr_merged_to_master
-    from qb_notebook.review_states import label_intervals, stage_timestamps
+    from qb_notebook.review_states import (
+        MATHLIB_LABEL_RETIRED_AT,
+        label_intervals,
+        stage_timestamps,
+    )
 
     return (
+        MATHLIB_LABEL_RETIRED_AT,
         Path,
         datetime,
         expr_merged_at_effective,
@@ -131,9 +136,37 @@ def _(expr_merged_at_effective, expr_merged_to_master, pl, prs):
 
 
 @app.cell
-def _(asof, events, label_intervals, label_selector, state_labels):
+def _(
+    MATHLIB_LABEL_RETIRED_AT,
+    asof,
+    events,
+    label_intervals,
+    label_selector,
+    pl,
+    prs,
+    state_labels,
+):
+    """Reconstruct label intervals with two end-of-interval clamps:
+
+    - `df_pr_close` closes any open interval at the PR's `closed_at` —
+      GitHub does **not** auto-remove labels on PR close, so labels
+      that were never explicitly removed before bors merged the PR
+      would otherwise show up as phantom open intervals running to
+      `asof`. This affects every label, not just retired ones.
+    - `label_asof_overrides` is the retirement-date safety net for
+      labels that were deleted from the repo (currently
+      `awaiting-review`, retired 2024-07-10). Combined with the close
+      clamp, the override only matters for the handful of PRs that
+      are still open and still carry the retired label.
+    """
     labels_chosen = label_selector.value or list(state_labels)
-    intervals_all = label_intervals(events, labels_chosen, asof=asof)
+    intervals_all = label_intervals(
+        events,
+        labels_chosen,
+        asof=asof,
+        label_asof_overrides=MATHLIB_LABEL_RETIRED_AT,
+        df_pr_close=prs.select(pl.col("id").alias("pull_request_id"), "closed_at"),
+    )
     return intervals_all, labels_chosen
 
 

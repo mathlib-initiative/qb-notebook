@@ -29,12 +29,22 @@ in when event E fired" lookup used by per-area attribution.
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Iterable
+from datetime import datetime, timezone
+from typing import Iterable, Mapping
 
 import polars as pl
 
 from qb_notebook.intervals import _resolve_asof
+
+# Mathlib labels that have been retired from the repo. Label deletion does
+# **not** emit ``UNLABELED`` events, so any interval whose apply event
+# precedes the deletion stays "open" forever unless we clamp it. Notebooks
+# that care about the current-state semantics (summary counts of
+# `currently_open`, stuck-PR tables) should pass this map as
+# ``label_asof_overrides`` to :func:`label_intervals`.
+MATHLIB_LABEL_RETIRED_AT: Mapping[str, datetime] = {
+    "awaiting-review": datetime(2024, 7, 10, tzinfo=timezone.utc),
+}
 
 # Bot accounts that apply labels in response to human comments. Used by
 # :func:`attribute_label_events` to skip the bot when looking for the
@@ -68,6 +78,8 @@ def label_intervals(
     label_name: str | Iterable[str],
     *,
     asof: datetime | None = None,
+    label_asof_overrides: Mapping[str, datetime] | None = None,
+    df_pr_close: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """Per-PR, per-label intervals reconstructed from LABELED/UNLABELED events.
 
@@ -81,6 +93,29 @@ def label_intervals(
     Open intervals (still applied at ``asof``) keep a null ``end`` and a
     non-null ``end_effective`` equal to ``asof``.
 
+    ``label_asof_overrides`` lets the caller specify a per-label
+    retirement timestamp for labels that were deleted from the repo (label
+    deletion does **not** emit ``UNLABELED`` events). For each label in
+    the mapping, intervals whose apply event precedes the override are
+    treated as closed at the override: ``end_effective`` becomes the
+    override and ``is_open`` becomes ``False``. ``end`` stays null because
+    no real UNLABELED event was observed. Pass
+    :data:`MATHLIB_LABEL_RETIRED_AT` to clamp mathlib4's retired labels
+    (currently `awaiting-review`).
+
+    ``df_pr_close`` lets the caller clamp open intervals at the PR's
+    actual close time. GitHub does not auto-remove labels when a PR is
+    closed (bors-merged or otherwise), so a label that was applied but
+    never explicitly removed before the PR closed shows up as a phantom
+    "open" interval running to ``asof``. Pass a frame with columns
+    ``pull_request_id`` and ``closed_at`` (e.g.
+    ``prs.select("id", "closed_at").rename({"id": "pull_request_id"})``):
+    for each interval whose ``end`` is null and ``start <= closed_at``,
+    ``end_effective`` becomes ``min(closed_at, end_effective)`` and
+    ``is_open`` becomes ``False``. Intervals applied to a PR *after* the
+    close (e.g. record-keeping re-labels of merged PRs) keep their open
+    state, since the label genuinely is applied post-close.
+
     Returns columns:
         ``pull_request_id``, ``label_name``, ``start``, ``end``,
         ``applied_by``, ``removed_by``, ``is_open``, ``end_effective``,
@@ -88,6 +123,7 @@ def label_intervals(
     """
     asof_dt = _resolve_asof(asof)
     labels = [label_name] if isinstance(label_name, str) else list(label_name)
+    overrides = {k: v for k, v in (label_asof_overrides or {}).items() if k in labels}
 
     sorted_events = (
         df_events.filter(pl.col("type").is_in(["LABELED", "UNLABELED"]))
@@ -171,7 +207,32 @@ def label_intervals(
         ]
     )
 
-    return (
+    if overrides:
+        # Per-label asof: open intervals for retired labels close at the
+        # override timestamp instead of the global asof.
+        override_expr = pl.lit(asof_dt)
+        for _lbl, _ts in overrides.items():
+            override_expr = (
+                pl.when(pl.col("label_name") == _lbl)
+                .then(pl.lit(_ts))
+                .otherwise(override_expr)
+            )
+        end_eff_expr = pl.coalesce([pl.col("end"), override_expr]).alias(
+            "end_effective"
+        )
+        # `is_open` is False for retired-label open intervals — the label state
+        # is no longer applicable, even though no UNLABELED event was emitted.
+        is_open_expr = (
+            pl.col("end").is_null()
+            & ~pl.col("label_name").is_in(list(overrides.keys()))
+        ).alias("is_open")
+    else:
+        end_eff_expr = pl.coalesce([pl.col("end"), pl.lit(asof_dt)]).alias(
+            "end_effective"
+        )
+        is_open_expr = pl.col("end").is_null().alias("is_open")
+
+    out = (
         starts.join(
             ends,
             on=["pull_request_id", "label_name", "interval_idx"],
@@ -179,23 +240,45 @@ def label_intervals(
         )
         .drop("interval_idx")
         .sort(["pull_request_id", "label_name", "start"])
-        .with_columns(
-            [
-                pl.col("end").is_null().alias("is_open"),
-                pl.coalesce([pl.col("end"), pl.lit(asof_dt)]).alias("end_effective"),
-            ]
+        .with_columns([is_open_expr, end_eff_expr])
+    )
+
+    if df_pr_close is not None:
+        # Clamp open intervals at the PR's close time. Only intervals that
+        # were applied before close get clamped — a label applied *after* a
+        # PR closed (e.g. post-merge record-keeping) is left open.
+        closes = df_pr_close.select(
+            pl.col("pull_request_id"),
+            pl.col("closed_at").alias("_pr_closed_at"),
+        ).drop_nulls(["pull_request_id", "_pr_closed_at"])
+        out = out.join(closes, on="pull_request_id", how="left")
+        clamp_pred = (
+            pl.col("is_open")
+            & pl.col("_pr_closed_at").is_not_null()
+            & (pl.col("start") <= pl.col("_pr_closed_at"))
         )
-        .with_columns((pl.col("end_effective") - pl.col("start")).alias("duration"))
-        .with_columns(
+        out = out.with_columns(
             [
-                (pl.col("duration").dt.total_seconds() / 3600.0).alias(
-                    "duration_hours"
-                ),
-                (pl.col("duration").dt.total_seconds() / 86400.0).alias(
-                    "duration_days"
-                ),
+                pl.when(clamp_pred)
+                .then(
+                    pl.min_horizontal(pl.col("end_effective"), pl.col("_pr_closed_at"))
+                )
+                .otherwise(pl.col("end_effective"))
+                .alias("end_effective"),
+                pl.when(clamp_pred)
+                .then(False)
+                .otherwise(pl.col("is_open"))
+                .alias("is_open"),
             ]
-        )
+        ).drop("_pr_closed_at")
+
+    return out.with_columns(
+        (pl.col("end_effective") - pl.col("start")).alias("duration")
+    ).with_columns(
+        [
+            (pl.col("duration").dt.total_seconds() / 3600.0).alias("duration_hours"),
+            (pl.col("duration").dt.total_seconds() / 86400.0).alias("duration_days"),
+        ]
     )
 
 

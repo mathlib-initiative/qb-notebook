@@ -71,14 +71,20 @@ def _():
 
 
 @app.cell
-def _(Path, datetime, load_pr_interval_data, timezone):
+def _(Path, datetime, load_pr_interval_data, pl, timezone):
     _data_dir = Path(__file__).resolve().parents[1] / "data"
     data = load_pr_interval_data(_data_dir)
     prs = data["prs"]
     events = data["events"]
     queue_windows = data["queue_windows"]
     asof = datetime.now(tz=timezone.utc)
-    return asof, events, prs, queue_windows
+    # Threaded into every `label_intervals` call below. GitHub does not
+    # auto-remove labels when a PR is closed (bors-merged or otherwise);
+    # without this clamp, e.g. `maintainer-merge` reports ~2964 phantom
+    # open intervals on this artifact, only 32 of which are actually on
+    # PRs that are still open.
+    pr_close = prs.select(pl.col("id").alias("pull_request_id"), "closed_at")
+    return asof, events, pr_close, prs, queue_windows
 
 
 @app.cell
@@ -99,11 +105,11 @@ def _(expr_merged_at_effective, expr_merged_to_master, pl, prs):
 
 
 @app.cell
-def _(asof, events, label_intervals, merged_prs, pl):
+def _(asof, events, label_intervals, merged_prs, pl, pr_close):
     # Approval intervals = `maintainer-merge` LABELED intervals. We take
     # the first application per PR as the start of the approved window;
     # the end is the effective merge (set later by joining merged_prs).
-    mm = label_intervals(events, "maintainer-merge", asof=asof)
+    mm = label_intervals(events, "maintainer-merge", asof=asof, df_pr_close=pr_close)
     first_mm = (
         mm.group_by("pull_request_id")
         .agg(pl.col("start").min().alias("first_mm_at"))
@@ -151,7 +157,7 @@ def _(mo):
 
 
 @app.cell
-def _(asof, events, first_mm, label_intervals, label_overlap_seconds, pl):
+def _(asof, events, first_mm, label_intervals, label_overlap_seconds, pl, pr_close):
     _windows = first_mm.select(
         [
             "pull_request_id",
@@ -166,7 +172,7 @@ def _(asof, events, first_mm, label_intervals, label_overlap_seconds, pl):
         "awaiting-CI",
         "awaiting-author",
     ):
-        _ivals = label_intervals(events, _label, asof=asof)
+        _ivals = label_intervals(events, _label, asof=asof, df_pr_close=pr_close)
         overlap = label_overlap_seconds(
             _ivals,
             overlap,
@@ -426,7 +432,7 @@ def _(mo):
 
 
 @app.cell
-def _(asof, events, label_intervals, mm, pl, prs):
+def _(asof, events, label_intervals, mm, pl, pr_close, prs):
     _open_prs = prs.filter(pl.col("state") == "open").select(
         [pl.col("id").alias("pull_request_id"), "number", "title", "head_ci_state"]
     )
@@ -445,7 +451,7 @@ def _(asof, events, label_intervals, mm, pl, prs):
     # Which stall labels are currently active on each of those PRs?
     _stalls = ("merge-conflict", "awaiting-CI", "awaiting-author", "ready-to-merge")
     active_stalls = (
-        label_intervals(events, list(_stalls), asof=asof)
+        label_intervals(events, list(_stalls), asof=asof, df_pr_close=pr_close)
         .filter(pl.col("is_open"))
         .group_by("pull_request_id")
         .agg(pl.col("label_name").unique().sort().alias("active_labels"))
@@ -497,8 +503,10 @@ def _(mo):
 
 
 @app.cell
-def _(asof, events, label_intervals, pl, plt):
-    _ci = label_intervals(events, "awaiting-CI", asof=asof).filter(~pl.col("is_open"))
+def _(asof, events, label_intervals, pl, plt, pr_close):
+    _ci = label_intervals(
+        events, "awaiting-CI", asof=asof, df_pr_close=pr_close
+    ).filter(~pl.col("is_open"))
     _vals = _ci.filter(pl.col("duration_hours") <= 72)["duration_hours"].to_numpy()
     _fig, _ax = plt.subplots(figsize=(9, 3.8))
     _ax.hist(_vals, bins=36, color="#c69", edgecolor="white")
