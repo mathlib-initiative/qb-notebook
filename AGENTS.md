@@ -104,6 +104,10 @@ logic in the notebook.
 
 ## Marimo Notebooks
 
+See [`marimo/AGENTS.md`](marimo/AGENTS.md) for the full set of marimo
+conventions and gotchas (notably the **512-byte header rule** — long
+docstrings can hide a notebook from the Workspace pane).
+
 Marimo notebooks live in `marimo/` as plain `.py` files (reactive cell DAG,
 no JSON / output state — clean git diffs).
 

@@ -107,7 +107,7 @@ reusable). Add 2–3 plots to the plot site.
 
 ### Theme 2 — Reviewer & maintainer load
 
-**Status: planned.**
+**Status: shipped (`marimo/reviewer_load.py`, `qb_notebook/teams.py`).**
 
 **Question**: Who is doing the review work, how concentrated is it, and is
 the active-reviewer pool growing or shrinking?
@@ -137,9 +137,21 @@ the active-reviewer pool growing or shrinking?
 `qb_notebook/reviewer_metrics.py`. Several plot-site additions.
 
 **Open questions**:
-- Multiple `maintainer-merge` applications to the same PR (after a
-  force-push) — count each, or count first only?
+- ~~Multiple `maintainer-merge` applications to the same PR (after a
+  force-push) — count each, or count first only?~~ Resolved: notebook
+  computes **both** ("per application" and "first per PR") side-by-side
+  so the gap surfaces re-sign-off load explicitly.
 - How to anonymize/aggregate when showing per-person plots publicly?
+
+**Notes from implementation**:
+- `qb_notebook/teams.py` reads `data/people.yaml` + `data/teams.yaml`
+  directly from a sibling `leanprover-community.github.io` checkout;
+  there is also a `python -m qb_notebook.teams` CLI for dumping a JSON
+  snapshot. Logins are lowercased before set ops.
+- The `maintainer-merge` label only entered use around mid-2024, so
+  the active-reviewer rolling chart spans ~2 years and yearly Lorenz
+  starts at 2024. `ready-to-merge` LABELED events go back to 2021 and
+  are richer for the bors-trigger overlay.
 
 ---
 
@@ -249,13 +261,13 @@ These keep showing up in multiple themes and should be implemented once:
 
 ## Roadmap
 
-| Session | Theme                          | Deliverable                                     |
-| ------- | ------------------------------ | ----------------------------------------------- |
-| 1       | Theme 1: state machine         | `review_state_machine.ipynb` + state helpers    |
-| 2       | Theme 2: reviewer load         | `reviewer_load.ipynb` + team-YAML loader        |
-| 3       | Theme 3: bottlenecks           | `bottleneck_localization.ipynb`                 |
-| 4       | Theme 4: area health           | `area_health.ipynb`                             |
-| 5       | Theme 5: PR shape              | `pr_shape_effects.ipynb`                        |
-| 6       | Plot site polish               | promote best plots from each notebook           |
+| Session | Theme                          | Deliverable                                              | Status   |
+| ------- | ------------------------------ | -------------------------------------------------------- | -------- |
+| 1       | Theme 1: state machine         | `marimo/review_state_machine.py` + `review_states.py`    | shipped  |
+| 2       | Theme 2: reviewer load         | `marimo/reviewer_load.py` + `qb_notebook/teams.py`       | shipped  |
+| 3       | Theme 3: bottlenecks           | `bottleneck_localization.ipynb`                          | planned  |
+| 4       | Theme 4: area health           | `area_health.ipynb`                                      | planned  |
+| 5       | Theme 5: PR shape              | `pr_shape_effects.ipynb`                                 | planned  |
+| 6       | Plot site polish               | promote best plots from each notebook                    | planned  |
 
 Order is flexible — Themes 1 and 2 are the highest-value starting points.
