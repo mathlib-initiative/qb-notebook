@@ -6,8 +6,27 @@ from qb_notebook.review_states import (
     attribute_label_events,
     label_intervals,
     label_overlap_seconds,
+    queue_window_intervals,
     stage_timestamps,
 )
+
+
+def _queue_windows(rows: list[dict]) -> pl.DataFrame:
+    """Build a queue_windows frame with the columns queue_window_intervals reads."""
+    return pl.DataFrame(
+        rows,
+        schema={
+            "pull_request_id": pl.Int64,
+            "rule_set_id": pl.Int64,
+            "cycle_index": pl.Int64,
+            "window_count": pl.Int64,
+            "first_on_queue_ts": pl.Datetime("us", "UTC"),
+            "from_ts": pl.Datetime("us", "UTC"),
+            "to_ts": pl.Datetime("us", "UTC"),
+            "opened_by_event_type": pl.String,
+            "closed_by_event_type": pl.String,
+        },
+    )
 
 
 def _events(rows: list[dict]) -> pl.DataFrame:
@@ -649,3 +668,122 @@ def test_attribute_returns_empty_when_label_absent() -> None:
     )
     out = attribute_label_events(ev, "maintainer-merge", window_seconds=600)
     assert out.height == 0
+
+
+def test_queue_window_intervals_closed_and_open() -> None:
+    qw = _queue_windows(
+        [
+            {
+                "pull_request_id": 1,
+                "rule_set_id": 3,
+                "cycle_index": 1,
+                "window_count": 1,
+                "first_on_queue_ts": _dt(1),
+                "from_ts": _dt(1),
+                "to_ts": _dt(3),
+                "opened_by_event_type": "CI_PASSED",
+                "closed_by_event_type": "CI_PASSED",
+            },
+            {
+                "pull_request_id": 1,
+                "rule_set_id": 3,
+                "cycle_index": 2,
+                "window_count": 2,
+                "first_on_queue_ts": _dt(1),
+                "from_ts": _dt(5),
+                "to_ts": None,
+                "opened_by_event_type": "CI_PASSED",
+                "closed_by_event_type": None,
+            },
+        ]
+    )
+    out = queue_window_intervals(qw, asof=_dt(10)).sort("start")
+    assert out.height == 2
+
+    closed = out.row(0, named=True)
+    assert closed["start"] == _dt(1)
+    assert closed["end"] == _dt(3)
+    assert closed["is_open"] is False
+    assert closed["end_effective"] == _dt(3)
+    assert closed["duration_days"] == 2.0
+    assert closed["cycle_index"] == 1
+    assert closed["rule_set_id"] == 3
+    assert closed["closed_by_event_type"] == "CI_PASSED"
+
+    open_row = out.row(1, named=True)
+    assert open_row["start"] == _dt(5)
+    assert open_row["end"] is None
+    assert open_row["is_open"] is True
+    assert open_row["end_effective"] == _dt(10)
+    assert open_row["duration_days"] == 5.0
+
+
+def test_queue_window_intervals_filters_by_ruleset() -> None:
+    qw = _queue_windows(
+        [
+            {
+                "pull_request_id": 1,
+                "rule_set_id": 2,
+                "cycle_index": 1,
+                "window_count": 1,
+                "first_on_queue_ts": _dt(1),
+                "from_ts": _dt(1),
+                "to_ts": _dt(2),
+                "opened_by_event_type": "CI_PASSED",
+                "closed_by_event_type": "CI_PASSED",
+            },
+            {
+                "pull_request_id": 1,
+                "rule_set_id": 3,
+                "cycle_index": 1,
+                "window_count": 1,
+                "first_on_queue_ts": _dt(1),
+                "from_ts": _dt(1),
+                "to_ts": _dt(2),
+                "opened_by_event_type": "CI_PASSED",
+                "closed_by_event_type": "CI_PASSED",
+            },
+        ]
+    )
+    out_default = queue_window_intervals(qw, asof=_dt(10))
+    assert out_default.height == 1
+    assert out_default["rule_set_id"].to_list() == [3]
+
+    out_all = queue_window_intervals(qw, rule_set_id=None, asof=_dt(10))
+    assert out_all.height == 2
+    assert sorted(out_all["rule_set_id"].to_list()) == [2, 3]
+
+
+def test_queue_window_intervals_overlap_with_label_overlap_seconds() -> None:
+    qw = _queue_windows(
+        [
+            {
+                "pull_request_id": 1,
+                "rule_set_id": 3,
+                "cycle_index": 1,
+                "window_count": 1,
+                "first_on_queue_ts": _dt(1),
+                "from_ts": _dt(2),
+                "to_ts": _dt(4),
+                "opened_by_event_type": "CI_PASSED",
+                "closed_by_event_type": "CI_PASSED",
+            },
+        ]
+    )
+    intervals = queue_window_intervals(qw, asof=_dt(10))
+
+    windows = pl.DataFrame(
+        {
+            "pull_request_id": [1],
+            "window_start": [_dt(1)],
+            "window_end": [_dt(3)],
+        },
+        schema={
+            "pull_request_id": pl.Int64,
+            "window_start": pl.Datetime("us", "UTC"),
+            "window_end": pl.Datetime("us", "UTC"),
+        },
+    )
+    out = label_overlap_seconds(intervals, windows)
+    assert out["overlap_seconds"].to_list() == [86400.0]
+    assert out["had_overlap"].to_list() == [True]

@@ -1,15 +1,27 @@
-"""Reconstruct label-state intervals from PR timeline events.
+"""Reconstruct PR review-state intervals from labels or queue windows.
 
-Mathlib's review handoff is encoded as labels (`awaiting-review`,
-`awaiting-author`, `WIP`, `maintainer-merge`, ...). This module turns
-`LABELED` / `UNLABELED` timeline events into per-PR per-label intervals
-so downstream analyses can talk in terms of state durations and
-transitions instead of raw events.
+Mathlib's review handoff is encoded as labels (`awaiting-author`,
+`WIP`, `maintainer-merge`, `ready-to-merge`, ...). :func:`label_intervals`
+turns `LABELED` / `UNLABELED` timeline events into per-PR per-label
+intervals so downstream analyses can talk in terms of state durations
+and transitions instead of raw events.
 
-It also exposes :func:`attribute_label_events`, which attributes a
-bot-applied label (e.g. `maintainer-merge`, `ready-to-merge`) to the
-human who triggered it via a comment or review event shortly before
-the label was applied.
+The legacy `awaiting-review` label (2021-08 → 2024-07) is still
+reconstructable here for historical cohorts, but is no longer applied
+to current PRs — the "in reviewers' court" state has been implicit
+since mid-2024 (PR open + not `awaiting-author` / `WIP`), with
+`analyzer_prqueuewindow` ruleset 3 as the closest machine-defined
+proxy. :func:`queue_window_intervals` exposes those windows in the
+same shape as :func:`label_intervals` so the two regimes can be
+analyzed and compared with the same downstream helpers.
+
+This module also exposes :func:`attribute_label_events`, which
+attributes a bot-applied label (e.g. `maintainer-merge`,
+`ready-to-merge`) to the human who triggered it via a comment or
+review event shortly before the label was applied, and
+:func:`label_overlap_seconds`, a generic per-PR interval-vs-window
+overlap helper used wherever a "did state X cover interval Y" question
+shows up.
 """
 
 from __future__ import annotations
@@ -411,4 +423,76 @@ def label_overlap_seconds(
         .with_columns(pl.col(overlap_col).fill_null(0.0))
         .with_columns((pl.col(overlap_col) > 0).alias(had_overlap_col))
         .drop("_row_idx")
+    )
+
+
+def queue_window_intervals(
+    df_queue_windows: pl.DataFrame,
+    *,
+    rule_set_id: int | None = 3,
+    asof: datetime | None = None,
+) -> pl.DataFrame:
+    """Queue-window intervals reshaped to match :func:`label_intervals` output.
+
+    The analyzer's `analyzer_prqueuewindow` table records, per ruleset,
+    each window during which a PR was "on the queue" — i.e. eligible for
+    reviewer attention. For mathlib4 ruleset 3 is the one driving the
+    dashboard. Each row is one (PR, window) pair; windows with a null
+    `to_ts` are still open at the artifact snapshot time.
+
+    This helper rewrites those rows into the same column convention as
+    :func:`label_intervals` so downstream tools (e.g.
+    :func:`label_overlap_seconds`) can consume label-derived and
+    queue-window-derived state interchangeably. Queue-window-specific
+    metadata is preserved alongside.
+
+    Open windows (still on queue at ``asof``) keep a null ``end`` and a
+    non-null ``end_effective`` equal to ``asof``.
+
+    Returns columns:
+        ``pull_request_id``, ``rule_set_id``, ``cycle_index``,
+        ``window_count``, ``first_on_queue_ts``, ``opened_by_event_type``,
+        ``closed_by_event_type``, ``start``, ``end``, ``is_open``,
+        ``end_effective``, ``duration``, ``duration_hours``,
+        ``duration_days``.
+    """
+    asof_dt = _resolve_asof(asof)
+
+    df = df_queue_windows
+    if rule_set_id is not None:
+        df = df.filter(pl.col("rule_set_id") == rule_set_id)
+
+    return (
+        df.drop_nulls(["pull_request_id", "from_ts"])
+        .select(
+            [
+                "pull_request_id",
+                "rule_set_id",
+                "cycle_index",
+                "window_count",
+                "first_on_queue_ts",
+                "opened_by_event_type",
+                "closed_by_event_type",
+                pl.col("from_ts").alias("start"),
+                pl.col("to_ts").alias("end"),
+            ]
+        )
+        .with_columns(
+            [
+                pl.col("end").is_null().alias("is_open"),
+                pl.coalesce([pl.col("end"), pl.lit(asof_dt)]).alias("end_effective"),
+            ]
+        )
+        .with_columns((pl.col("end_effective") - pl.col("start")).alias("duration"))
+        .with_columns(
+            [
+                (pl.col("duration").dt.total_seconds() / 3600.0).alias(
+                    "duration_hours"
+                ),
+                (pl.col("duration").dt.total_seconds() / 86400.0).alias(
+                    "duration_days"
+                ),
+            ]
+        )
+        .sort(["pull_request_id", "start"])
     )

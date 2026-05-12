@@ -29,6 +29,17 @@ def _(mo):
     `maintainer-merge` intervals from `LABELED`/`UNLABELED` events and
     shows how long PRs spend in each state, how often they bounce, and
     the stage-by-stage merge timeline.
+
+    **Note on `awaiting-review`.** This label was retired around
+    2024-07-10 and removed from `syncer_labeldef`; the
+    "in reviewers' court" state on current PRs is implicit (PR open +
+    not `awaiting-author` / `WIP`), with `analyzer_prqueuewindow`
+    ruleset 3 as the closest modern proxy. The plots below still
+    reconstruct historical `awaiting-review` intervals (2021-08 →
+    2024-07) — useful for retrospectives, but PRs created after the
+    cutover contribute zero `awaiting-review` time. See the
+    cross-cutting TODO in `docs/review-analysis-plan.md` for the
+    unified-intervals helper that would close this gap.
     """)
     return
 

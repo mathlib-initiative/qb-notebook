@@ -61,10 +61,17 @@ buildable in its own session.
 
 ## Key mathlib labels (workflow state machine)
 
-- `awaiting-review` — PR is in reviewers' court.
+- `awaiting-review` — historically marked "PR is in reviewers' court"
+  (used 2021-08 → 2024-07-10, then retired and removed from
+  `syncer_labeldef`; a tombstone `awaiting-review-DONT-USE` label
+  exists). After retirement the "in reviewers' court" state is
+  implicit (PR open + not `awaiting-author` / `WIP`); the analyzer's
+  queue-window ruleset 3 (`analyzer_prqueuewindow`) is the closest
+  modern, machine-defined proxy.
 - `awaiting-author` — PR is back in author's court (changes requested).
 - `WIP` — author marks as work-in-progress.
-- `maintainer-merge` — reviewer sign-off applied.
+- `maintainer-merge` — reviewer sign-off applied (label introduced
+  2024-02-15; overlaps with `awaiting-review` for ~5 months).
 - `delegated` — author has been granted delegated-merge permission.
 - `auto-merge-after-CI` — queued to merge once CI passes.
 - `ready-to-merge` — in bors queue.
@@ -80,7 +87,9 @@ implementing each theme.
 
 ### Theme 1 — Review state machine (sojourn times & ping-pong)
 
-**Status: next up.**
+**Status: shipped (label-based: `marimo/review_state_machine.py`; queue-window
+companion: `marimo/queue_window_state.py`,
+`qb_notebook.review_states.queue_window_intervals`).**
 
 **Question**: How much of a PR's life is spent in each review state, and how
 often do PRs bounce between states before merging?
@@ -108,6 +117,33 @@ reusable). Add 2–3 plots to the plot site.
 **Open questions**:
 - How do we treat draft PRs in state accounting?
 - Should we exclude PRs that never received a review-relevant label?
+- Post-2024-07 PRs have no `awaiting-review` events at all (label
+  retired); the original notebook tracks the label as-is, which is
+  fine for historical cohorts but silently empty on recent PRs.
+  The queue-window companion (below) is the working substitute for
+  current PRs.
+
+**Queue-window companion** (`marimo/queue_window_state.py`): mirrors
+the label-based notebook but reconstructs the "in reviewers' court"
+state from `analyzer_prqueuewindow` ruleset 3 via
+`qb_notebook.review_states.queue_window_intervals` (same column shape
+as `label_intervals`, plus `cycle_index`, `window_count`,
+`opened_by_event_type`, `closed_by_event_type`). Provides:
+
+- Queue-window sojourn distribution, long-tail summary, monthly
+  quantiles, stuck-open table — direct visual analogues of the
+  label-based plots, but covering all of 2021-05 → present.
+- Ping-pong-equivalent: distribution of `max(cycle_index)` per PR.
+- Stage-by-stage cumulative latency uses `first_on_queue_ts` in place
+  of first `awaiting-review`.
+- **Overlap-cohort cell** (2022-11-01 → 2024-07-10): for the 11.9k
+  PRs that saw both signals, compares per-PR `awaiting-review` seconds
+  vs. queue-open seconds. Empirical Jaccard distribution is heavily
+  right-shifted (median ≈ 0.98; ≈70% of PRs above 0.8), confirming
+  ruleset 3 is a near-faithful successor to the retired label. The
+  unified-intervals helper proposed under
+  [Cross-cutting infrastructure](#cross-cutting-infrastructure) can
+  lean on this with high confidence.
 
 ---
 
@@ -221,12 +257,15 @@ Theme 4 / Theme 5 for any "did label X overlap interval Y" question).
 
 **Notes from implementation**:
 
-- The `awaiting-review` label that earlier drafts of this plan
-  assumed doesn't actually exist on the mathlib4 repo — Theme 1's
-  `awaiting-review` track silently aggregates zero intervals. The
-  "in reviewers' court" state is implicit (PR is open + not
-  `awaiting-author` / `WIP`). Worth a follow-up cleanup in the plan
-  and in Theme 1's defaults.
+- The `awaiting-review` label was retired around 2024-07-10 (last
+  event in the dump), shortly after `maintainer-merge` was rolled
+  out in 2024-02. It is no longer in `syncer_labeldef`. Historical
+  intervals (2021-08 → 2024-07) are still in `events` and remain
+  useful for retrospectives. For PRs created after the cutover the
+  "in reviewers' court" state is implicit (PR open + not
+  `awaiting-author` / `WIP`), with `analyzer_prqueuewindow` ruleset
+  3 as the closest machine-defined proxy. Bottleneck localization
+  here does not consume `awaiting-review` directly.
 - ~3 % of cohort PRs are filtered out by `mm_to_merge_days < 0` —
   these are the cases where `maintainer-merge` was (re)applied
   *after* the bors merge, typically as part of a maintainer
@@ -318,13 +357,33 @@ These keep showing up in multiple themes and should be implemented once:
 - **`actor_counts(events, label_name, freq='1mo')`** — group LABELED
   events by actor and time bucket. Used by Themes 2, 4.
 
+### Future TODO — unified "in reviewers' court" intervals
+
+The reviewer-court state is split across two regimes in the current
+data: explicit `awaiting-review` label intervals (2021-08 → 2024-07)
+and the queue-window-based state afterwards. The pieces are in place:
+`qb_notebook.review_states.queue_window_intervals` returns
+queue-derived intervals in the same shape as `label_intervals`, and
+the overlap cohort in `marimo/queue_window_state.py` confirms ~98 %
+median Jaccard between the two signals during the overlap years —
+strong enough to lean on. The remaining step is a thin helper that
+returns a single per-PR set of intervals (queue-window everywhere,
+since it covers 2021-05 → present, with the option to also union in
+`awaiting-review` for the small slice where the queue window misses
+something) so Themes 2, 4, and 5 can use one definition end-to-end.
+A nice-to-have upstream change: an explicit `queueboard-core`
+ruleset preserving the original `awaiting-review` semantics, so the
+choice of ruleset_id encodes "court" rather than living in helper
+code.
+
 ## Roadmap
 
 | Session | Theme                          | Deliverable                                              | Status   |
 | ------- | ------------------------------ | -------------------------------------------------------- | -------- |
-| 1       | Theme 1: state machine         | `marimo/review_state_machine.py` + `review_states.py`    | shipped  |
+| 1       | Theme 1: state machine (labels)| `marimo/review_state_machine.py` + `review_states.py`    | shipped  |
 | 2       | Theme 2: reviewer load         | `marimo/reviewer_load.py` + `qb_notebook/teams.py`       | shipped  |
 | 3       | Theme 3: bottlenecks           | `marimo/bottleneck_localization.py`                      | shipped  |
+| 3.5     | Theme 1 companion (queue)      | `marimo/queue_window_state.py` + `queue_window_intervals`| shipped  |
 | 4       | Theme 4: area health           | `area_health.ipynb`                                      | planned  |
 | 5       | Theme 5: PR shape              | `pr_shape_effects.ipynb`                                 | planned  |
 | 6       | Plot site polish               | promote best plots from each notebook                    | planned  |
