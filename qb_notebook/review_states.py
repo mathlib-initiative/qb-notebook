@@ -19,6 +19,8 @@ This module also exposes :func:`attribute_label_events`, which
 attributes a bot-applied label (e.g. `maintainer-merge`,
 `ready-to-merge`) to the human who triggered it via a comment or
 review event shortly before the label was applied,
+:func:`first_review_touch`, which finds the earliest non-author,
+non-bot review/comment event per PR for first-touch-latency analyses,
 :func:`label_overlap_seconds`, a generic per-PR interval-vs-window
 overlap helper used wherever a "did state X cover interval Y" question
 shows up, and :func:`labels_active_at`, which given a set of
@@ -81,6 +83,21 @@ DEFAULT_TRIGGER_EVENT_TYPES: tuple[str, ...] = (
     "REVIEW_APPROVED",
     "REVIEW_COMMENTED",
     "REVIEW_CHANGES_REQUESTED",
+)
+
+# Timeline event types that count as a non-author "touch" on a PR — i.e.
+# evidence that someone other than the author has engaged with the PR.
+# Used by :func:`first_review_touch`. ``REVIEW_DISMISSED`` is included
+# because a maintainer dismissing a stale review is a meaningful touch
+# even if the dismisser doesn't simultaneously leave a comment.
+# Callers can drop ``ISSUE_COMMENTED`` for a stricter "substantive review"
+# variant that excludes top-level comments.
+DEFAULT_TOUCH_EVENT_TYPES: tuple[str, ...] = (
+    "REVIEW_APPROVED",
+    "REVIEW_COMMENTED",
+    "REVIEW_CHANGES_REQUESTED",
+    "REVIEW_DISMISSED",
+    "ISSUE_COMMENTED",
 )
 
 
@@ -445,6 +462,99 @@ def attribute_label_events(
                 "gap_seconds",
                 "attributed",
             ]
+        )
+    )
+
+
+def first_review_touch(
+    df_prs: pl.DataFrame,
+    df_events: pl.DataFrame,
+    *,
+    event_types: Iterable[str] = DEFAULT_TOUCH_EVENT_TYPES,
+    bot_actors: Iterable[str] = DEFAULT_BOT_ACTORS,
+    pr_id_col: str = "id",
+    pr_open_col: str = "gh_created_at",
+    pr_author_col: str = "author_login",
+) -> pl.DataFrame:
+    """Per-PR earliest non-author, non-bot review-or-comment event.
+
+    For each row in ``df_prs``, finds the earliest event in ``df_events``
+    whose ``type`` is in ``event_types`` and whose ``actor_login`` is
+    neither the PR author nor a known bot. Returns one row per PR; PRs
+    with no qualifying event get null touch columns.
+
+    ``df_prs`` must carry the PR id (``pr_id_col``), the PR open
+    timestamp (``pr_open_col``), and the author's GitHub login
+    (``pr_author_col``). The author login isn't on ``syncer_pullrequest``
+    natively — callers should join ``core_user.github_login`` onto
+    ``prs.author_id`` upstream::
+
+        users = data["users"]  # core_user.parquet
+        prs_with_author = df_prs.join(
+            users.select(
+                pl.col("id").alias("author_id"),
+                pl.col("github_login").alias("author_login"),
+            ),
+            on="author_id",
+            how="left",
+        )
+
+    Comparison is case-insensitive on both sides. PRs whose author login
+    is null (e.g. deleted GitHub account) keep all events as candidate
+    touches — the author exclusion silently no-ops.
+
+    Returns columns: ``pull_request_id``, ``first_touch_at``,
+    ``first_touch_actor``, ``first_touch_event_type``,
+    ``first_touch_seconds_from_open`` (float seconds; null when no touch).
+    """
+    bots = frozenset(b.lower() for b in bot_actors)
+    types = list(event_types)
+
+    pr_keys = df_prs.select(
+        pl.col(pr_id_col).alias("pull_request_id"),
+        pl.col(pr_open_col).alias("_pr_open_at"),
+        pl.col(pr_author_col).str.to_lowercase().alias("_author_lc"),
+    )
+
+    # Tie-break on actor_login so the test order is deterministic when
+    # two qualifying events share occurred_at on the same PR.
+    candidates = (
+        df_events.filter(pl.col("type").is_in(types))
+        .drop_nulls(["pull_request_id", "occurred_at", "actor_login"])
+        .with_columns(pl.col("actor_login").str.to_lowercase().alias("_actor_lc"))
+        .filter(~pl.col("_actor_lc").is_in(list(bots)))
+        .join(pr_keys, on="pull_request_id", how="inner")
+        .filter(
+            (pl.col("_actor_lc") != pl.col("_author_lc"))
+            | pl.col("_author_lc").is_null()
+        )
+        .sort(["pull_request_id", "occurred_at", "_actor_lc"])
+        .unique(subset=["pull_request_id"], keep="first")
+        .select(
+            "pull_request_id",
+            pl.col("occurred_at").alias("first_touch_at"),
+            pl.col("actor_login").alias("first_touch_actor"),
+            pl.col("type").alias("first_touch_event_type"),
+            "_pr_open_at",
+        )
+        .with_columns(
+            (pl.col("first_touch_at") - pl.col("_pr_open_at"))
+            .dt.total_seconds()
+            .cast(pl.Float64)
+            .alias("first_touch_seconds_from_open")
+        )
+        .drop("_pr_open_at")
+    )
+
+    return (
+        pr_keys.select("pull_request_id")
+        .join(candidates, on="pull_request_id", how="left")
+        .select(
+            "pull_request_id",
+            "first_touch_at",
+            "first_touch_actor",
+            "first_touch_event_type",
+            "first_touch_seconds_from_open",
         )
     )
 

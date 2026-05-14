@@ -5,6 +5,7 @@ import polars as pl
 from qb_notebook.review_states import (
     MATHLIB_LABEL_RETIRED_AT,
     attribute_label_events,
+    first_review_touch,
     label_intervals,
     label_overlap_seconds,
     labels_active_at,
@@ -1267,6 +1268,255 @@ def test_reviewers_court_label_asof_clamps_open_label_intervals() -> None:
     assert row["is_open"] is True
     assert row["end_effective"] == label_asof
     assert row["duration_days"] == 4.0
+
+
+# ---- first_review_touch -----------------------------------------------------
+
+
+def _prs_frame(rows: list[dict]) -> pl.DataFrame:
+    return pl.DataFrame(
+        rows,
+        schema={
+            "id": pl.Int64,
+            "gh_created_at": pl.Datetime("us", "UTC"),
+            "author_login": pl.String,
+        },
+    )
+
+
+def test_first_review_touch_basic() -> None:
+    """A single qualifying event from a non-author non-bot becomes the touch."""
+    prs = _prs_frame([{"id": 1, "gh_created_at": _dt(1), "author_login": "alice"}])
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(2),
+                "type": "REVIEW_COMMENTED",
+                "label_name": None,
+                "actor_login": "bob",
+            },
+        ]
+    )
+    out = first_review_touch(prs, ev)
+    assert out.height == 1
+    row = out.row(0, named=True)
+    assert row["pull_request_id"] == 1
+    assert row["first_touch_at"] == _dt(2)
+    assert row["first_touch_actor"] == "bob"
+    assert row["first_touch_event_type"] == "REVIEW_COMMENTED"
+    assert row["first_touch_seconds_from_open"] == 86400.0
+
+
+def test_first_review_touch_skips_author() -> None:
+    """The PR author's own comment doesn't count as a touch."""
+    prs = _prs_frame([{"id": 1, "gh_created_at": _dt(1), "author_login": "alice"}])
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(2),
+                "type": "ISSUE_COMMENTED",
+                "label_name": None,
+                "actor_login": "alice",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(3),
+                "type": "ISSUE_COMMENTED",
+                "label_name": None,
+                "actor_login": "bob",
+            },
+        ]
+    )
+    out = first_review_touch(prs, ev)
+    row = out.row(0, named=True)
+    assert row["first_touch_actor"] == "bob"
+    assert row["first_touch_at"] == _dt(3)
+
+
+def test_first_review_touch_skips_bots() -> None:
+    """Bot comments are excluded even if they precede a human one."""
+    prs = _prs_frame([{"id": 1, "gh_created_at": _dt(1), "author_login": "alice"}])
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(2),
+                "type": "ISSUE_COMMENTED",
+                "label_name": None,
+                "actor_login": "github-actions",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(3),
+                "type": "ISSUE_COMMENTED",
+                "label_name": None,
+                "actor_login": "bob",
+            },
+        ]
+    )
+    out = first_review_touch(prs, ev)
+    row = out.row(0, named=True)
+    assert row["first_touch_actor"] == "bob"
+
+
+def test_first_review_touch_earliest_wins() -> None:
+    """Multiple qualifying events → keep the earliest."""
+    prs = _prs_frame([{"id": 1, "gh_created_at": _dt(1), "author_login": "alice"}])
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(5),
+                "type": "REVIEW_COMMENTED",
+                "label_name": None,
+                "actor_login": "carol",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(2),
+                "type": "ISSUE_COMMENTED",
+                "label_name": None,
+                "actor_login": "bob",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(3),
+                "type": "REVIEW_APPROVED",
+                "label_name": None,
+                "actor_login": "dan",
+            },
+        ]
+    )
+    out = first_review_touch(prs, ev)
+    row = out.row(0, named=True)
+    assert row["first_touch_at"] == _dt(2)
+    assert row["first_touch_actor"] == "bob"
+
+
+def test_first_review_touch_no_qualifying_event_yields_nulls() -> None:
+    """A PR with no qualifying event still appears in the output with null cols."""
+    prs = _prs_frame([{"id": 1, "gh_created_at": _dt(1), "author_login": "alice"}])
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(2),
+                "type": "LABELED",  # not a touch type
+                "label_name": "awaiting-review",
+                "actor_login": "bob",
+            },
+        ]
+    )
+    out = first_review_touch(prs, ev)
+    assert out.height == 1
+    row = out.row(0, named=True)
+    assert row["first_touch_at"] is None
+    assert row["first_touch_actor"] is None
+    assert row["first_touch_seconds_from_open"] is None
+
+
+def test_first_review_touch_isolates_per_pr() -> None:
+    prs = _prs_frame(
+        [
+            {"id": 1, "gh_created_at": _dt(1), "author_login": "alice"},
+            {"id": 2, "gh_created_at": _dt(1), "author_login": "bob"},
+        ]
+    )
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(3),
+                "type": "REVIEW_COMMENTED",
+                "label_name": None,
+                "actor_login": "carol",
+            },
+            {
+                "pull_request_id": 2,
+                "occurred_at": _dt(2),
+                "type": "REVIEW_COMMENTED",
+                "label_name": None,
+                "actor_login": "carol",
+            },
+        ]
+    )
+    out = first_review_touch(prs, ev).sort("pull_request_id")
+    assert out["first_touch_at"].to_list() == [_dt(3), _dt(2)]
+
+
+def test_first_review_touch_case_insensitive_author() -> None:
+    """Author/actor login comparison is case-insensitive."""
+    prs = _prs_frame([{"id": 1, "gh_created_at": _dt(1), "author_login": "Alice"}])
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(2),
+                "type": "ISSUE_COMMENTED",
+                "label_name": None,
+                "actor_login": "alice",  # same person, different case
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(3),
+                "type": "ISSUE_COMMENTED",
+                "label_name": None,
+                "actor_login": "BOB",
+            },
+        ]
+    )
+    out = first_review_touch(prs, ev)
+    row = out.row(0, named=True)
+    assert row["first_touch_actor"] == "BOB"
+
+
+def test_first_review_touch_null_author_keeps_all_events() -> None:
+    """Author login null (deleted GH user) silently no-ops the exclusion."""
+    prs = _prs_frame([{"id": 1, "gh_created_at": _dt(1), "author_login": None}])
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(2),
+                "type": "ISSUE_COMMENTED",
+                "label_name": None,
+                "actor_login": "alice",
+            },
+        ]
+    )
+    out = first_review_touch(prs, ev)
+    row = out.row(0, named=True)
+    assert row["first_touch_actor"] == "alice"
+
+
+def test_first_review_touch_custom_event_types() -> None:
+    """Passing a stricter event_types drops ISSUE_COMMENTED touches."""
+    prs = _prs_frame([{"id": 1, "gh_created_at": _dt(1), "author_login": "alice"}])
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(2),
+                "type": "ISSUE_COMMENTED",
+                "label_name": None,
+                "actor_login": "bob",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(5),
+                "type": "REVIEW_APPROVED",
+                "label_name": None,
+                "actor_login": "carol",
+            },
+        ]
+    )
+    strict = ("REVIEW_APPROVED", "REVIEW_COMMENTED", "REVIEW_CHANGES_REQUESTED")
+    out = first_review_touch(prs, ev, event_types=strict)
+    row = out.row(0, named=True)
+    assert row["first_touch_event_type"] == "REVIEW_APPROVED"
+    assert row["first_touch_at"] == _dt(5)
 
 
 def test_queue_window_intervals_overlap_with_label_overlap_seconds() -> None:

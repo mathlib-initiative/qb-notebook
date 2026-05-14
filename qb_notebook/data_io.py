@@ -20,6 +20,11 @@ _QUEUE_WINDOW_FK_COLS: tuple[str, ...] = (
     "closed_by_timeline_event_id",
 )
 
+# FK columns on syncer_pullrequest that arrive as Float64 for the same
+# nullable-bigint reason. Cast at load time so notebooks can join against
+# `core_user.id` (Int64) without each one re-casting.
+_PR_FK_COLS: tuple[str, ...] = ("author_id",)
+
 # `%#z` parses offsets like +00:00 in the current Polars/chrono combo.
 _DEFAULT_DATETIME_FORMAT = "%Y-%m-%d %T%.f%#z"
 
@@ -112,7 +117,9 @@ def load_pr_interval_data(data_dir: str | Path = "data") -> dict[str, pl.DataFra
     - syncer_prreviewinlinecomment.parquet → key ``inline_comments``
 
     The ``queue_windows`` frame has its FK columns cast from Float64 to Int64
-    (nullable integers are exported as float by the Django/parquet pipeline).
+    (nullable integers are exported as float by the Django/parquet pipeline);
+    ``prs.author_id`` is cast for the same reason so it joins against
+    ``core_user.id`` directly.
 
     ``events`` includes the post-2026-05 timeline event types
     (``ISSUE_COMMENTED``, ``REVIEW_APPROVED``, ``REVIEW_COMMENTED``,
@@ -123,8 +130,10 @@ def load_pr_interval_data(data_dir: str | Path = "data") -> dict[str, pl.DataFra
     root = Path(data_dir)
     qw_raw = _read_and_parse(root / "analyzer_prqueuewindow.parquet")
     qw = _cast_float_to_nullable_int(qw_raw, _QUEUE_WINDOW_FK_COLS)
+    prs_raw = _read_and_parse(root / "syncer_pullrequest.parquet")
+    prs = _cast_float_to_nullable_int(prs_raw, _PR_FK_COLS)
     out: dict[str, pl.DataFrame] = {
-        "prs": _read_and_parse(root / "syncer_pullrequest.parquet"),
+        "prs": prs,
         "events": _read_and_parse(root / "syncer_prtimelineevent.parquet"),
         "label_defs": _read_and_parse(root / "syncer_labeldef.parquet"),
         "prlabel": _read_and_parse(root / "syncer_prlabel.parquet"),

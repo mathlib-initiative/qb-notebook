@@ -502,6 +502,18 @@ These keep showing up in multiple themes and should be implemented once:
   checkout at runtime.
 - **`actor_counts(events, label_name, freq='1mo')`** — group LABELED
   events by actor and time bucket. Used by Themes 2, 4.
+- **`first_review_touch(df_prs, df_events, *, event_types, bot_actors)`** —
+  per-PR earliest non-author, non-bot review/comment event. Returns
+  one row per PR with `first_touch_at` / `first_touch_actor` /
+  `first_touch_event_type` / `first_touch_seconds_from_open`; PRs with
+  no qualifying event get nulls. Requires `df_prs` to carry
+  `author_login` (join `core_user.github_login` on `prs.author_id`
+  upstream — `load_pr_interval_data` already casts `author_id` to
+  `Int64` for that join). Default `event_types` covers `REVIEW_*` +
+  `ISSUE_COMMENTED`; pass a stricter tuple for a "substantive review"
+  variant. Lives in `qb_notebook/review_states.py`. Used by Session 11
+  (first-touch latency cells in `marimo/reviewer_load.py`); ready for
+  Stories A (anatomy-of-a-merge) and D (newcomer experience). ✅ shipped.
 - **`reviewers_court_intervals(events, queue_windows, *, asof, label_asof)`** —
   unified per-PR "in reviewers' court" intervals. Per-PR, queue-window
   (ruleset 3) is primary; `awaiting-review` label intervals fall back
@@ -725,6 +737,178 @@ renderer module (e.g. `qb_notebook/plotting/theme_4.py`) and
 registered. Doing one notebook end-to-end first will set the pattern
 for the rest.
 
+## Post-shipping survey — gaps and stories (Sessions 11+)
+
+A survey after the five themes + Sessions 6-9 cleanups surfaced two
+buckets of follow-up work:
+
+- **Gaps**: small/medium follow-ups that close a specific blind spot.
+  Shipped through autonomously; pause for review only if a major
+  design question arises.
+- **Stories**: synthesis notebooks that combine helpers across themes
+  into a single narrative. Pause for review after each story before
+  the next ships.
+
+### Gaps
+
+In rough priority order (highest leverage / smallest first):
+
+1. **First-touch latency** (Theme 2 follow-up) — time from PR open to
+   the first non-author non-bot review event. The metric authors feel;
+   Theme 2 only measures *closing* the review loop. **Session 11.**
+2. **Inline-comment review-depth signal** —
+   `syncer_prreviewinlinecomment.parquet` is loaded by `data_io` but no
+   theme touches it. Per-PR comment volume, cuts by `lines_bucket` /
+   `pr_type`, correlation with TTM and ping-pong. Only proxy for
+   *substantive* review the dataset has (bodies aren't exported).
+3. **Approval-source disagreement** — `prs.approvals` (GitHub-native)
+   has ~52 % coverage on maintainer-merged PRs. Characterize the
+   non-overlap: native approvals without `maintainer-merge` label, and
+   vice versa. Sanity-check on the attribution heuristic.
+4. **Reviewer cohort survival / churn** — of reviewers active in year
+   X, what fraction still active in year Y? Theme 2 has trend totals
+   but no retention curves.
+5. **Reviewer specialization** — entropy of areas-per-reviewer, top-3
+   area share per reviewer, generalists vs. area-locked. Theme 4's
+   bipartite matrix has the raw data; needs summary metrics.
+6. **Force-push impact** — `HEAD_FORCE_PUSHED` is in the event stream
+   but unused. Does a force-push reset reviewer attention (next-touch
+   latency)? Per-PR penalty.
+7. **Delegated-merge path** — the `delegated` label is in the workflow
+   list but no theme analyzes it. Volume, who delegates, latency vs.
+   the standard `maintainer-merge` route.
+8. **Time-of-day / timezone patterns** — global community, no
+   time-of-day analysis yet. Review-desert windows, weekend latency,
+   author/reviewer activity-window correlations.
+9. **PR dependency graph** — `analyzer_prdependency` /
+   `analyzer_prdependencystate` parquets are exported but untouched
+   here. Chains of stuck PRs, fan-in/fan-out, cascading unlocks.
+   Larger scope (new tables); split if it overflows one session.
+10. **CI failures deep-dive** — `syncer_commitcheckrun` /
+    `syncer_commitstatuscontext` parquets, deliberately punted in
+    Theme 3. Which checks fail most, time-to-red→green, failure
+    clustering. Larger scope.
+
+### Stories
+
+Synthesis notebooks; each pauses for review before the next starts.
+Order TBD — current best guess listed first.
+
+- **A. Anatomy of a merge** — end-to-end lifecycle waterfall: open →
+  first-touch → first `maintainer-merge` → bors queue → merge. Median
+  / p90 per stage + fraction of total time each stage owns. The
+  best front-page chart; ties Themes 1+2+3 + first-touch gap.
+- **B. Where does latency hide** — stacked decomposition of TTM into
+  (author-court / reviewer-court / approved-but-stuck / bors-queue)
+  seconds per PR. Themes 1+3 + the queue-window helper.
+- **C. Anatomy of a stuck PR** — operational dashboard for the
+  currently-open backlog, classifying each PR by *why* it's stuck
+  (CI red, awaiting author, merge conflict, no review yet, in bors
+  loop). Complements Theme 3's stuck table with structured causes.
+- **D. Newcomer experience** — Theme-5 first-time-author cohort ×
+  Theme-4 area × Theme-2 reviewer attribution × first-touch (gap 1).
+  How fast does the project welcome new contributors?
+- **E. Sustainability** — reviewer bus factor trend (Theme 2) +
+  cohort survival (gap 4) + area coverage decline (Theme 4). Is the
+  project's reviewer bench renewing itself?
+- **F. Bors queue health** — bors-specific deep-dive: queue length
+  over time, retry cycles, close-reason mix, cycle_index trends.
+  Theme 3 has the helpers; deserves its own notebook.
+
+### Session 11 — first-touch latency (gap) — shipped
+
+**Question**: How long does an author wait before *any* reviewer (or
+other non-bot non-author commenter) engages with their PR? Theme 2
+measured the *closing* trigger; this is the metric authors actually
+feel — and the natural newcomer-experience proxy.
+
+**Approach**: Add `first_review_touch(df_prs, df_events, *,
+event_types=..., asof=None)` to `qb_notebook/review_states.py`. For
+each PR, return the earliest event matching `event_types` whose actor
+is neither the PR author nor a known bot. Default `event_types`
+covers `REVIEW_APPROVED` / `REVIEW_COMMENTED` /
+`REVIEW_CHANGES_REQUESTED` / `REVIEW_DISMISSED` / `ISSUE_COMMENTED`;
+callers can drop `ISSUE_COMMENTED` for a stricter "substantive review"
+variant. Returns one row per PR with `first_touch_at`,
+`first_touch_actor`, `first_touch_event_type`,
+`first_touch_seconds_from_open`. PRs with no qualifying event get
+nulls.
+
+The post-#164 ingest is what makes this newly possible (REVIEW_* /
+ISSUE_COMMENTED weren't exported before 2026-05). PRs whose first
+touch would have predated the ingest cutover are dropped from the
+headline distribution; the coverage cell calls this out.
+
+**Plots / metrics** (added to `marimo/reviewer_load.py` as a new
+section after the attribution-coverage cells):
+
+- Coverage cell: total PRs eligible for the metric vs. PRs with a
+  qualifying first touch vs. PRs that closed/merged without one.
+- Distribution of `first_touch_seconds_from_open` — overall, then a
+  ≤7d zoom; report median / p50 / p90 headline.
+- Two variants side-by-side: `ISSUE_COMMENTED`-allowed (broad) vs
+  `REVIEW_*`-only (substantive). Quantify the gap.
+- Monthly median / p90 trend over `gh_created_at` cohorts.
+- Cuts by `lines_bucket`, `pr_type`, `is_first_pr` via the
+  `qb_notebook.pr_shape` decorator pattern from Session 8.
+- Per-area latency (recent 12mo): attribute each PR-open point to its
+  active `t-*` area via `labels_active_at` on `label_intervals`.
+
+**Data**: `prs` (`gh_created_at`, `author_id`/`author_login`),
+`events` (post-#164 review/comment events), `label_defs`, plus
+`pr_shape` and `labels_active_at` helpers for cuts.
+
+**Output**: `first_review_touch` helper + 5-6 new cells in
+`marimo/reviewer_load.py`. Unit tests in `tests/test_review_states.py`
+covering bot exclusion, author exclusion, multi-event first-wins,
+no-event PRs, per-PR isolation, and the `event_types` parameter.
+
+**Open questions**:
+- Author comments on their own PR — excluded as a touch (we want
+  external engagement).
+- Re-opened PRs: first touch is keyed off `gh_created_at` rather than
+  the last `REOPENED`; the second-life latency is a future variant.
+- ~~Pre-#164 cohort right-censoring~~ — resolved: the upstream syncer
+  backfilled REVIEW_* / ISSUE_COMMENTED events all the way to 2021-05,
+  so there's no censoring window. Coverage is uniformly high.
+
+**Notes from implementation**:
+
+- **Coverage** is high: **93.4 %** of all 38.6k PRs in the snapshot
+  have a broad touch (REVIEW_* or ISSUE_COMMENTED by a non-author
+  non-bot); **63.5 %** have a strict (REVIEW_*-only) touch. Only
+  **0.5 %** merged without any broad touch (likely maintainer
+  self-merges or fast-path infra changes); **4.3 %** are
+  closed-unmerged with no touch (authors abandoned before anyone
+  engaged).
+- **Broad headline** (n=36 080): median **9.1 h**, p75 **67.6 h** (~2.8d),
+  p90 **325.7 h** (~13.6d), p99 **2 757 h** (~115d).
+- **Strict headline** (n=24 533): median **15.6 h**, p75 **115.2 h**
+  (~4.8d), p90 **479 h** (~20d), p99 **2 918 h** (~122d). Roughly
+  ~6h slower at the median, because dropping ISSUE_COMMENTED loses a
+  lot of fast "drive-by" first-touch chatter.
+- **Size effect**: median broad touch climbs **2.9 h** (0-10 lines) →
+  7.4 h (11-50) → 14.0 h (51-200) → **18.5 h** (201-1000) →
+  16.0 h (1001+). Same "1001+ slightly faster than 201-1000"
+  inversion as Theme 5's TTM gradient — large refactor PRs really do
+  get fast-tracked at the *first-touch* stage too, not just at
+  merge time.
+- **PR-type effect** is dramatic: `perf:` at **0.85 h** median is
+  fastest by far; `feat:` at **18.8 h** is slowest, **~22× slower**.
+  `chore:` (n=11.5k, second-largest cohort after `feat:`) lands at
+  4.2 h. The `feat:` long tail (p90 ≈ 22d) drives most of the
+  project's first-touch p90.
+- **First-time-author surprise**: median broad touch is **7.77 h**
+  for first-time-authors (n=769) vs **9.13 h** for returning
+  (n=35 293) — first-timers actually get **faster** first touch at
+  the median, p90 also marginally better (287 h vs 327 h). The
+  "newcomers wait longer" hypothesis from the Stories backlog does
+  *not* hold for first-touch; if there's a newcomer disadvantage
+  it must live downstream (reviewed-rate, merge-rate, time-to-close
+  cycles) — which Theme 5 already documented. **Updates the
+  newcomer-experience story (D) framing** to focus on the funnel
+  beyond first-touch.
+
 ## Roadmap
 
 | Session | Theme                          | Deliverable                                              | Status   |
@@ -740,7 +924,10 @@ for the rest.
 | 8       | Cross-cuts: shape × area       | Theme 1/3 sojourn & stall signals × `pr_type`/`lines_bucket`/area | shipped |
 | 9       | Theme 2/5: tier + WIP follow-ups | active-reviewer trend split by team; `had_wip_label_at_open` cut | shipped |
 | 10      | Plot site polish               | promote best plots from each notebook                    | planned  |
+| 11      | Gap: first-touch latency       | `first_review_touch` helper + section in `reviewer_load.py`     | shipped  |
+| 12+     | Gaps & stories                 | see "Post-shipping survey" section above for the backlog        | planned  |
 
 Order is flexible — Themes 1 and 2 were the highest-value starting points;
 the post-Theme-5 sessions (6+) are cleanups and cross-cuts unlocked by the
-shipped helpers.
+shipped helpers. Sessions 11+ ship gaps autonomously and pause for
+review after each story.

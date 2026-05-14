@@ -46,29 +46,45 @@ def _():
     import polars as pl
 
     from qb_notebook.data_io import load_pr_interval_data
-    from qb_notebook.review_states import attribute_label_events
+    from qb_notebook.pr_shape import author_cohort, pr_type, size_buckets
+    from qb_notebook.review_states import (
+        attribute_label_events,
+        first_review_touch,
+    )
     from qb_notebook.teams import load as load_teams
 
     return (
         Path,
         attribute_label_events,
+        author_cohort,
         datetime,
+        first_review_touch,
         load_pr_interval_data,
         load_teams,
         np,
         pl,
         plt,
+        pr_type,
+        size_buckets,
         timezone,
     )
 
 
 @app.cell
-def _(Path, datetime, load_pr_interval_data, timezone):
+def _(Path, datetime, load_pr_interval_data, pl, timezone):
     _data_dir = Path(__file__).resolve().parents[1] / "data"
     data = load_pr_interval_data(_data_dir)
     events = data["events"]
+    prs_raw = data["prs"]
+    # core_user isn't part of load_pr_interval_data; map author_id ->
+    # github_login here so first_review_touch can compare actor vs author.
+    _users = pl.read_parquet(_data_dir / "core_user.parquet")
+    users = _users.select(
+        pl.col("id").alias("author_id"),
+        pl.col("github_login").alias("author_login"),
+    )
     asof = datetime.now(tz=timezone.utc)
-    return asof, events
+    return asof, events, prs_raw, users
 
 
 @app.cell
@@ -607,6 +623,270 @@ def _(mo, per_bors, pl, teams):
             ]
         )
     coverage_table
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 5. First-touch latency
+
+    Time from PR open to the first non-author non-bot review-or-comment
+    event. Closer to the metric authors feel than the Theme-2
+    attribution-based metrics, which measure when the review loop
+    *closes*.
+
+    Two variants:
+
+    - **broad** — counts `REVIEW_*` and `ISSUE_COMMENTED` as touches.
+    - **strict** — `REVIEW_*` only (excludes top-level comments).
+    """)
+    return
+
+
+@app.cell
+def _(author_cohort, pr_type, prs_raw, size_buckets, users):
+    """Join author_login + apply pr_shape decorators (Session 8 pattern)."""
+    _prs_with_author = prs_raw.join(users, on="author_id", how="left")
+    prs_shaped = pr_type(author_cohort(size_buckets(_prs_with_author)))
+    prs_shaped_slim = prs_shaped.select(
+        "id",
+        "gh_created_at",
+        "author_login",
+        "lines_bucket",
+        "pr_type",
+        "is_first_pr",
+        "merged_at",
+        "state",
+    )
+    return (prs_shaped_slim,)
+
+
+@app.cell
+def _(events, first_review_touch, pl, prs_shaped_slim):
+    """Compute both touch variants per PR and join back onto the shaped frame."""
+    _strict_types = ("REVIEW_APPROVED", "REVIEW_COMMENTED", "REVIEW_CHANGES_REQUESTED")
+    _broad = first_review_touch(prs_shaped_slim, events)
+    _strict = first_review_touch(prs_shaped_slim, events, event_types=_strict_types)
+    first_touch = (
+        prs_shaped_slim.join(
+            _broad.rename(
+                {
+                    "first_touch_at": "broad_at",
+                    "first_touch_actor": "broad_actor",
+                    "first_touch_event_type": "broad_type",
+                    "first_touch_seconds_from_open": "broad_seconds",
+                }
+            ),
+            left_on="id",
+            right_on="pull_request_id",
+            how="left",
+        )
+        .join(
+            _strict.rename(
+                {
+                    "first_touch_at": "strict_at",
+                    "first_touch_actor": "strict_actor",
+                    "first_touch_event_type": "strict_type",
+                    "first_touch_seconds_from_open": "strict_seconds",
+                }
+            ),
+            left_on="id",
+            right_on="pull_request_id",
+            how="left",
+        )
+        .with_columns(
+            (pl.col("broad_seconds") / 86400.0).alias("broad_days"),
+            (pl.col("strict_seconds") / 86400.0).alias("strict_days"),
+        )
+    )
+    return (first_touch,)
+
+
+@app.cell
+def _(first_touch, mo, pl):
+    """Coverage: how many PRs ever got a qualifying touch?"""
+    _total = first_touch.height
+    _has_broad = first_touch.filter(pl.col("broad_at").is_not_null()).height
+    _has_strict = first_touch.filter(pl.col("strict_at").is_not_null()).height
+    _merged_no_broad = first_touch.filter(
+        pl.col("broad_at").is_null() & pl.col("merged_at").is_not_null()
+    ).height
+    _closed_no_broad = first_touch.filter(
+        pl.col("broad_at").is_null()
+        & pl.col("merged_at").is_null()
+        & (pl.col("state") == "closed")
+    ).height
+    first_touch_coverage = pl.DataFrame(
+        [
+            {"variant": "all PRs", "n": _total, "pct": 100.0},
+            {
+                "variant": "broad touch present",
+                "n": _has_broad,
+                "pct": round(100.0 * _has_broad / max(_total, 1), 1),
+            },
+            {
+                "variant": "strict touch present",
+                "n": _has_strict,
+                "pct": round(100.0 * _has_strict / max(_total, 1), 1),
+            },
+            {
+                "variant": "merged but no broad touch",
+                "n": _merged_no_broad,
+                "pct": round(100.0 * _merged_no_broad / max(_total, 1), 1),
+            },
+            {
+                "variant": "closed-unmerged, no broad touch",
+                "n": _closed_no_broad,
+                "pct": round(100.0 * _closed_no_broad / max(_total, 1), 1),
+            },
+        ]
+    )
+    mo.md("### Coverage")
+    first_touch_coverage
+    return
+
+
+@app.cell
+def _(first_touch, np, pl, plt):
+    """Distribution of first-touch latency (broad vs strict), ≤7d zoom."""
+    _broad = first_touch.filter(
+        pl.col("broad_days").is_not_null() & (pl.col("broad_days") <= 7)
+    )["broad_days"].to_numpy()
+    _strict = first_touch.filter(
+        pl.col("strict_days").is_not_null() & (pl.col("strict_days") <= 7)
+    )["strict_days"].to_numpy()
+    _fig, _ax = plt.subplots(figsize=(10, 4))
+    _bins = np.linspace(0, 7, 71)
+    _ax.hist(_broad, bins=_bins, color="#6aa3d8", alpha=0.55, label="broad")
+    _ax.hist(_strict, bins=_bins, color="#c63", alpha=0.55, label="strict")
+    _ax.set_xlabel("Days from PR open → first touch")
+    _ax.set_ylabel("PRs")
+    _ax.set_title("First-touch latency (≤7d zoom)")
+    _ax.legend()
+    _ax.grid(True, alpha=0.3)
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _(first_touch, np, pl):
+    """Headline percentiles (hours) for both variants."""
+
+    def _pcts(arr: np.ndarray) -> dict:
+        if arr.size == 0:
+            return {
+                "n": 0,
+                "median_h": None,
+                "p75_h": None,
+                "p90_h": None,
+                "p99_h": None,
+            }
+        return {
+            "n": int(arr.size),
+            "median_h": round(float(np.median(arr) * 24), 2),
+            "p75_h": round(float(np.percentile(arr, 75) * 24), 2),
+            "p90_h": round(float(np.percentile(arr, 90) * 24), 2),
+            "p99_h": round(float(np.percentile(arr, 99) * 24), 2),
+        }
+
+    _broad_arr = first_touch.filter(pl.col("broad_days").is_not_null())[
+        "broad_days"
+    ].to_numpy()
+    _strict_arr = first_touch.filter(pl.col("strict_days").is_not_null())[
+        "strict_days"
+    ].to_numpy()
+    first_touch_pcts = pl.DataFrame(
+        [
+            {"variant": "broad", **_pcts(_broad_arr)},
+            {"variant": "strict", **_pcts(_strict_arr)},
+        ]
+    )
+    first_touch_pcts
+    return
+
+
+@app.cell
+def _(first_touch, mo, pl, plt):
+    """Monthly trend of broad first-touch latency by gh_created_at cohort."""
+    _df = (
+        first_touch.filter(pl.col("broad_seconds").is_not_null())
+        .with_columns(pl.col("gh_created_at").dt.truncate("1mo").alias("month"))
+        .group_by("month")
+        .agg(
+            pl.len().alias("n"),
+            pl.col("broad_seconds").median().alias("median_s"),
+            pl.col("broad_seconds").quantile(0.9).alias("p90_s"),
+        )
+        .sort("month")
+        .with_columns(
+            (pl.col("median_s") / 3600.0).alias("median_h"),
+            (pl.col("p90_s") / 3600.0).alias("p90_h"),
+        )
+        .filter(pl.col("n") >= 50)
+    )
+    _fig, _ax = plt.subplots(figsize=(11, 4))
+    _ax.plot(
+        _df["month"].to_numpy(),
+        _df["median_h"].to_numpy(),
+        label="median",
+        color="#3a6",
+    )
+    _ax.plot(
+        _df["month"].to_numpy(),
+        _df["p90_h"].to_numpy(),
+        label="p90",
+        color="#c63",
+    )
+    _ax.set_yscale("log")
+    _ax.set_ylabel("Hours (log)")
+    _ax.set_xlabel("PR-open month")
+    _ax.set_title("First-touch latency by cohort month (broad)")
+    _ax.legend()
+    _ax.grid(True, alpha=0.3, which="both")
+    _fig.tight_layout()
+    mo.md("### Monthly trend (broad)")
+    _fig
+    return
+
+
+@app.cell
+def _(first_touch, mo, np, pl):
+    """Cuts by lines_bucket / pr_type / is_first_pr (broad variant)."""
+
+    def _summary(df: pl.DataFrame, key: str) -> pl.DataFrame:
+        rows = []
+        for _name, _sub in df.group_by(key, maintain_order=False):
+            _vals = _sub.filter(pl.col("broad_seconds").is_not_null())[
+                "broad_seconds"
+            ].to_numpy()
+            if _vals.size == 0:
+                continue
+            rows.append(
+                {
+                    key: (_name[0] if isinstance(_name, tuple) else _name),
+                    "n": int(_vals.size),
+                    "median_h": round(float(np.median(_vals) / 3600.0), 2),
+                    "p90_h": round(float(np.percentile(_vals, 90) / 3600.0), 2),
+                }
+            )
+        return pl.DataFrame(rows).sort("median_h")
+
+    cuts_lines = _summary(first_touch, "lines_bucket")
+    cuts_type = _summary(first_touch, "pr_type")
+    cuts_first = _summary(first_touch, "is_first_pr")
+    mo.vstack(
+        [
+            mo.md("### By PR shape (broad)"),
+            mo.md("**By `lines_bucket`**"),
+            cuts_lines,
+            mo.md("**By `pr_type`**"),
+            cuts_type,
+            mo.md("**By `is_first_pr`**"),
+            cuts_first,
+        ]
+    )
     return
 
 
