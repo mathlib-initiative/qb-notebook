@@ -644,3 +644,108 @@ cover seasonality.
   doesn't predict first-touch latency**. Story D (newcomer
   experience) and any future "where does latency hide" story (B)
   should not assume timezone gap is a primary contributor.
+
+## Session 15 — Story A: anatomy of a merge — shipped
+
+First synthesis story. End-to-end PR lifecycle waterfall combining
+Themes 1+2+3 and the first-touch / inline-comment / temporal helpers
+into a single milestone-funnel notebook.
+
+**Deliverables**:
+
+- New helper `pipeline_stages(df_prs, df_events, *, ...)` in
+  `qb_notebook/review_states.py`. Wraps `first_review_touch` +
+  `stage_timestamps` into a per-PR wide frame with the four
+  sequential stage deltas: open→first-touch, touch→MM, MM→RTM,
+  RTM→merged, plus the total open→merged seconds. Non-monotonic
+  deltas (e.g. RTM applied before MM) null rather than going
+  negative so log-scale histograms stay clean. 6 unit tests cover
+  linear merge, closed-unmerged, direct-bors (no MM), non-monotonic
+  ordering, empty-events, and `pr_merged_col=None`.
+- New `marimo/anatomy_of_a_merge.py` with the following sections:
+  - **Intro + cohort dropdown** (post-MM / 2024 / 2025 / all-time)
+    + Sankey-branch-by-cycle-count toggle.
+  - **Lifecycle Sankey** (plotly — first plotly usage in the marimo
+    set). Nodes: opened, touched, [1 / 2 / 3+ queue cycles when
+    toggle on], maintainer-merge, bors r+, delegated, merged,
+    closed unmerged, still open. Each PR contributes one path; the
+    `bors r+` and `delegated` nodes are independent of MM (a PR
+    that skips MM still routes through `bors r+` if RTM was
+    applied).
+  - **Per-stage duration distributions** — 4-panel log-binned
+    histograms (`np.logspace`) + lognormal-fit overlay
+    (`scipy.stats.lognorm` with `floc=0`). Lognormal binning is the
+    `pr_open_durations.ipynb` convention; stage deltas inherit the
+    same shape character.
+  - **Stage share of TTM** — stacked horizontal bar of the
+    summed-medians, with per-stage median / p90 / n table.
+  - **Queue-cycle distribution** — histogram of cycles-before-MM
+    on merged PRs + median-TTM-by-bucket bar chart.
+  - **Slice tables** (median stage durations × slice value):
+    `pr_type`, `lines_bucket`, top-10 topic areas, first-PR vs
+    returning author. Topic attribution uses `labels_active_at`
+    against unclamped `t-*` intervals (the
+    `[start, end_effective)` lookup would miss merges whose
+    `merged_at_effective` equals `closed_at` if intervals were
+    clamped at close time).
+  - **Review activity** — 3-panel log-binned histograms of
+    non-author non-bot REVIEW_*, ISSUE_COMMENTED, and inline
+    comments per merged PR.
+  - **Path classification** — counts and TTM medians by
+    `bors` / `delegated` / `mm_no_rtm` / `direct` paths.
+
+**Empirical headlines (post-MM cohort, 27 781 PRs)**:
+
+- **Funnel coverage**: 91 % reach first touch, 80 % merge,
+  12 % close unmerged, 8 % still open. The **maintainer-merge
+  label is only applied on 29 % of cohort PRs** (8 154 / 27 781) —
+  most merges skip it. **RTM is applied on 66 %** (18 375), and
+  **delegated on ~26 %** of merges. Of merged PRs: **72 % via
+  bors r+** (15 864), **27 % via delegated** (5 941), **1.4 % via
+  `direct`** (315 — merged with no MM/RTM/delegated), 0.3 % via
+  `mm_no_rtm` (56).
+- **Stage medians (merged PRs only)**: open→first-touch **0.45d**
+  (p90 16.65d), first-touch→MM **0.06d** (p90 21.58d, very heavy
+  tail), MM→RTM **0.22d** (p90 3.77d), RTM→merged **0.03d** (p90
+  0.10d — bors is fast once queued). Total median open→merged
+  **2.28d** (p90 37.61d).
+- **Stage share of summed medians at the merged-PR median**:
+  open→first-touch dominates at ~62 % of summed medians; the
+  three downstream stages share the remaining ~38 %. The story
+  matches Theme 3's finding that **reviewer attention onset is the
+  biggest single contributor to median TTM**, not the bors queue.
+- **Queue cycles**: median merged PR reaches MM in **1 queue
+  cycle**; cycle count is a useful gating signal — 1-cycle PRs
+  have much lower median touch→MM latency than 3+-cycle PRs.
+- **Topic-area coverage**: 76.7 % of merged PRs have an active
+  `t-*` label at merge time. Top areas in the cohort:
+  `t-algebra` (4 851), `t-category-theory` (2 113),
+  `t-analysis` (1 783), `t-topology` (1 418), `t-data` (1 253).
+
+**Conventions established**:
+
+- Log-binned histograms with lognormal-fit overlay are the
+  preferred shape for stage-duration distributions. The
+  `np.logspace(np.log10(lo), np.log10(hi), bins+1)` recipe
+  matches `pr_open_durations.ipynb`.
+- For merge-time topic-area attribution via `labels_active_at`,
+  **do not pass `df_pr_close`** — the half-open
+  `[start, end_effective)` lookup misses the merge instant when
+  `merged_at_effective == closed_at`. Convention: leave intervals
+  open through `asof`, mirroring `area_health.py`.
+- Plotly Sankey is the canonical choice for lifecycle flow viz.
+  `go.Figure(...)` renders directly as a marimo cell output; no
+  wrapper needed.
+
+**Notes / follow-ups**:
+
+- Headline that **most merges skip MM** (`bors` path with no prior
+  MM is 9 287 PRs vs 6 231 with MM in the cohort) is an
+  interesting reframe for any "MM as universal sign-off" framing.
+  Worth flagging in Theme 2 / reviewer load follow-ups.
+- The TTM stage share above is at the **median**; at p90 the bors
+  queue contributes more (still-modest tails on RTM→merged) and
+  touch→MM blows up further. A p90-share variant is a small follow-up.
+- Story B (latency decomposition) owns the deeper court-vs-author
+  split of the `first-touch → MM` stage. We exposed only queue-cycle
+  count as the queue-aware signal here.

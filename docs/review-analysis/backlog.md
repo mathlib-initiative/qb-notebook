@@ -78,10 +78,15 @@ In rough priority order (highest leverage / smallest first):
 Synthesis notebooks; each pauses for review before the next starts.
 Order TBD — current best guess listed first.
 
-- **A. Anatomy of a merge** — end-to-end lifecycle waterfall: open →
-  first-touch → first `maintainer-merge` → bors queue → merge. Median
-  / p90 per stage + fraction of total time each stage owns. The
-  best front-page chart; ties Themes 1+2+3 + first-touch gap.
+- ~~**A. Anatomy of a merge**~~ — **shipped as Session 15**
+  ([`sessions.md`](sessions.md#session-15--story-a-anatomy-of-a-merge--shipped)).
+  New `pipeline_stages` helper + `marimo/anatomy_of_a_merge.py`
+  (plotly Sankey + 4-panel log-binned stage histograms + slices by
+  pr_type / lines / topic / cohort + path classification).
+  Headlines: post-MM merged PRs have median TTM **2.28d** (p90
+  37.61d); open→first-touch owns ~62 % of summed median TTM;
+  **71 % of merges skip the maintainer-merge label** (bors r+
+  directly); 27 % of merges go via the delegated path.
 - **B. Where does latency hide** — stacked decomposition of TTM into
   (author-court / reviewer-court / approved-but-stuck / bors-queue)
   seconds per PR. Themes 1+3 + the queue-window helper.

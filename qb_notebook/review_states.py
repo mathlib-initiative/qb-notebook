@@ -30,7 +30,11 @@ in when event E fired" lookup used by per-area attribution, and
 :func:`inline_comment_stats`, which rolls
 ``syncer_prreviewinlinecomment`` rows up to per-PR review-depth
 counts (comments, threads, distinct non-author reviewers, files
-touched) for the inline-comment-volume cross-cuts.
+touched) for the inline-comment-volume cross-cuts, and
+:func:`pipeline_stages`, which combines :func:`first_review_touch`
+and :func:`stage_timestamps` into a single wide per-PR frame with the
+four sequential stage-delta seconds the "anatomy of a merge" story
+keys off.
 """
 
 from __future__ import annotations
@@ -661,6 +665,144 @@ def inline_comment_stats(
             pl.col("gh_created_at").max().alias("last_inline_at"),
         )
         .sort("pull_request_id")
+    )
+
+
+def pipeline_stages(
+    df_prs: pl.DataFrame,
+    df_events: pl.DataFrame,
+    *,
+    asof: datetime | None = None,
+    touch_event_types: Iterable[str] = DEFAULT_TOUCH_EVENT_TYPES,
+    bot_actors: Iterable[str] = DEFAULT_BOT_ACTORS,
+    pr_id_col: str = "id",
+    pr_open_col: str = "gh_created_at",
+    pr_author_col: str = "author_login",
+    pr_merged_col: str | None = "merged_at",
+    maintainer_merge_label: str = MAINTAINER_MERGE_LABEL,
+    ready_to_merge_label: str = READY_TO_MERGE_LABEL,
+) -> pl.DataFrame:
+    """Per-PR five-stage milestone frame: open → first touch → MM → RTM → merged.
+
+    Combines :func:`first_review_touch` and :func:`stage_timestamps` into a
+    single wide per-PR frame with the four sequential stage deltas the
+    "anatomy of a merge" story needs:
+
+    - **stage 1** open → first non-author, non-bot touch
+    - **stage 2** first touch → first ``maintainer-merge`` label
+    - **stage 3** first ``maintainer-merge`` → first ``ready-to-merge`` label
+    - **stage 4** first ``ready-to-merge`` → merge
+
+    A stage delta is null when either endpoint is null or the endpoints are
+    in non-monotonic order (e.g. RTM applied before MM — happens rarely
+    when ``bors r+`` is run without a prior ``maintainer merge`` comment).
+    The total ``seconds_open_to_merged`` follows the same convention so
+    log-scale histograms can drop nulls cleanly.
+
+    Parameters
+    ----------
+    df_prs:
+        One row per candidate PR. Must carry ``pr_id_col`` (PR id),
+        ``pr_open_col`` (PR creation time), and ``pr_author_col`` (GitHub
+        login; join from ``core_user`` upstream — see
+        :func:`first_review_touch` for the canonical pattern).
+        ``pr_merged_col`` is optional; pass ``None`` (or a column of
+        nulls) for an "all candidates" frame that includes
+        closed-unmerged PRs. Mathlib callers typically pass the bors-aware
+        effective merge timestamp built with
+        :func:`qb_notebook.filters.expr_merged_to_master` +
+        :func:`qb_notebook.filters.expr_merged_at_effective` before
+        calling.
+    df_events:
+        Timeline events frame; must include LABELED events for the
+        ``maintainer-merge`` and ``ready-to-merge`` labels plus the
+        touch event types.
+
+    Returns one row per PR in ``df_prs`` with columns:
+
+    - ``pull_request_id``
+    - ``opened_at``, ``first_touch_at``, ``first_maintainer_merge_at``,
+      ``first_ready_to_merge_at``, ``merged_at_effective``
+    - ``seconds_open_to_first_touch``,
+      ``seconds_first_touch_to_maintainer_merge``,
+      ``seconds_maintainer_merge_to_ready_to_merge``,
+      ``seconds_ready_to_merge_to_merged``
+    - ``seconds_open_to_merged`` — total TTM when both endpoints are
+      present and ``merged_at_effective >= opened_at``.
+
+    The ``asof`` parameter is accepted for API symmetry with the other
+    review-state helpers but is not currently used: stage timestamps come
+    from observed events, not from clamping open intervals.
+    """
+    _ = asof  # reserved for future use; included for API symmetry
+
+    touch = first_review_touch(
+        df_prs,
+        df_events,
+        event_types=touch_event_types,
+        bot_actors=bot_actors,
+        pr_id_col=pr_id_col,
+        pr_open_col=pr_open_col,
+        pr_author_col=pr_author_col,
+    )
+
+    label_firsts = stage_timestamps(
+        df_events,
+        label_order=(maintainer_merge_label, ready_to_merge_label),
+    )
+    mm_col = f"first_{maintainer_merge_label.replace('-', '_')}"
+    rtm_col = f"first_{ready_to_merge_label.replace('-', '_')}"
+
+    merged_expr: pl.Expr
+    if pr_merged_col is None or pr_merged_col not in df_prs.columns:
+        merged_expr = pl.lit(None, dtype=pl.Datetime("us", "UTC")).alias(
+            "merged_at_effective"
+        )
+    else:
+        merged_expr = pl.col(pr_merged_col).alias("merged_at_effective")
+
+    base = df_prs.select(
+        pl.col(pr_id_col).alias("pull_request_id"),
+        pl.col(pr_open_col).alias("opened_at"),
+        merged_expr,
+    )
+
+    wide = base.join(
+        touch.select("pull_request_id", "first_touch_at"),
+        on="pull_request_id",
+        how="left",
+    ).join(
+        label_firsts.select(
+            "pull_request_id",
+            pl.col(mm_col).alias("first_maintainer_merge_at"),
+            pl.col(rtm_col).alias("first_ready_to_merge_at"),
+        ),
+        on="pull_request_id",
+        how="left",
+    )
+
+    def _delta(start: str, end: str, out: str) -> pl.Expr:
+        diff = (pl.col(end) - pl.col(start)).dt.total_seconds().cast(pl.Float64)
+        return pl.when(diff >= 0).then(diff).otherwise(None).alias(out)
+
+    return wide.with_columns(
+        _delta("opened_at", "first_touch_at", "seconds_open_to_first_touch"),
+        _delta(
+            "first_touch_at",
+            "first_maintainer_merge_at",
+            "seconds_first_touch_to_maintainer_merge",
+        ),
+        _delta(
+            "first_maintainer_merge_at",
+            "first_ready_to_merge_at",
+            "seconds_maintainer_merge_to_ready_to_merge",
+        ),
+        _delta(
+            "first_ready_to_merge_at",
+            "merged_at_effective",
+            "seconds_ready_to_merge_to_merged",
+        ),
+        _delta("opened_at", "merged_at_effective", "seconds_open_to_merged"),
     )
 
 

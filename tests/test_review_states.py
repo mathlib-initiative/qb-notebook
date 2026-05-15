@@ -10,6 +10,7 @@ from qb_notebook.review_states import (
     label_intervals,
     label_overlap_seconds,
     labels_active_at,
+    pipeline_stages,
     queue_window_intervals,
     reviewers_court_intervals,
     stage_timestamps,
@@ -1786,3 +1787,253 @@ def test_inline_comment_stats_orphan_pr_treats_all_as_others() -> None:
     assert row["n_inline_comments"] == 1
     assert row["n_inline_comments_by_others"] == 1
     assert row["n_inline_authors"] == 1
+
+
+# ---- pipeline_stages --------------------------------------------------------
+
+
+def _prs_pipeline(rows: list[dict]) -> pl.DataFrame:
+    """Build a prs frame with the columns pipeline_stages reads."""
+    return pl.DataFrame(
+        rows,
+        schema={
+            "id": pl.Int64,
+            "gh_created_at": pl.Datetime("us", "UTC"),
+            "author_login": pl.String,
+            "merged_at": pl.Datetime("us", "UTC"),
+        },
+    )
+
+
+_SECONDS_PER_DAY = 86400.0
+
+
+def test_pipeline_stages_linear_merge() -> None:
+    """Open → touch → MM → RTM → merged produces four positive deltas."""
+    prs = _prs_pipeline(
+        [
+            {
+                "id": 1,
+                "gh_created_at": _dt(1),
+                "author_login": "alice",
+                "merged_at": _dt(10),
+            }
+        ]
+    )
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(2),
+                "type": "REVIEW_COMMENTED",
+                "label_name": None,
+                "actor_login": "bob",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(4),
+                "type": "LABELED",
+                "label_name": "maintainer-merge",
+                "actor_login": "bot",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(7),
+                "type": "LABELED",
+                "label_name": "ready-to-merge",
+                "actor_login": "bot",
+            },
+        ]
+    )
+    out = pipeline_stages(prs, ev)
+    assert out.height == 1
+    row = out.row(0, named=True)
+    assert row["opened_at"] == _dt(1)
+    assert row["first_touch_at"] == _dt(2)
+    assert row["first_maintainer_merge_at"] == _dt(4)
+    assert row["first_ready_to_merge_at"] == _dt(7)
+    assert row["merged_at_effective"] == _dt(10)
+    assert row["seconds_open_to_first_touch"] == _SECONDS_PER_DAY
+    assert row["seconds_first_touch_to_maintainer_merge"] == 2 * _SECONDS_PER_DAY
+    assert row["seconds_maintainer_merge_to_ready_to_merge"] == 3 * _SECONDS_PER_DAY
+    assert row["seconds_ready_to_merge_to_merged"] == 3 * _SECONDS_PER_DAY
+    assert row["seconds_open_to_merged"] == 9 * _SECONDS_PER_DAY
+
+
+def test_pipeline_stages_unmerged_pr_keeps_partial_milestones() -> None:
+    """A closed-unmerged PR with a touch but no MM/RTM nulls the downstream deltas."""
+    prs = _prs_pipeline(
+        [
+            {
+                "id": 7,
+                "gh_created_at": _dt(1),
+                "author_login": "alice",
+                "merged_at": None,
+            }
+        ]
+    )
+    ev = _events(
+        [
+            {
+                "pull_request_id": 7,
+                "occurred_at": _dt(3),
+                "type": "REVIEW_COMMENTED",
+                "label_name": None,
+                "actor_login": "bob",
+            },
+        ]
+    )
+    out = pipeline_stages(prs, ev)
+    row = out.row(0, named=True)
+    assert row["first_touch_at"] == _dt(3)
+    assert row["first_maintainer_merge_at"] is None
+    assert row["first_ready_to_merge_at"] is None
+    assert row["merged_at_effective"] is None
+    assert row["seconds_open_to_first_touch"] == 2 * _SECONDS_PER_DAY
+    assert row["seconds_first_touch_to_maintainer_merge"] is None
+    assert row["seconds_maintainer_merge_to_ready_to_merge"] is None
+    assert row["seconds_ready_to_merge_to_merged"] is None
+    assert row["seconds_open_to_merged"] is None
+
+
+def test_pipeline_stages_no_touch_no_mm_direct_bors_merge() -> None:
+    """Direct bors merge: RTM applied without a prior touch or MM; downstream
+    deltas null since their start endpoints are missing, but the total
+    open→merged delta is still computed from `gh_created_at` and `merged_at`."""
+    prs = _prs_pipeline(
+        [
+            {
+                "id": 2,
+                "gh_created_at": _dt(1),
+                "author_login": "alice",
+                "merged_at": _dt(5),
+            }
+        ]
+    )
+    ev = _events(
+        [
+            {
+                "pull_request_id": 2,
+                "occurred_at": _dt(4),
+                "type": "LABELED",
+                "label_name": "ready-to-merge",
+                "actor_login": "bot",
+            },
+        ]
+    )
+    out = pipeline_stages(prs, ev)
+    row = out.row(0, named=True)
+    assert row["first_touch_at"] is None
+    assert row["first_maintainer_merge_at"] is None
+    assert row["first_ready_to_merge_at"] == _dt(4)
+    assert row["seconds_open_to_first_touch"] is None
+    assert row["seconds_first_touch_to_maintainer_merge"] is None
+    assert row["seconds_maintainer_merge_to_ready_to_merge"] is None
+    assert row["seconds_ready_to_merge_to_merged"] == _SECONDS_PER_DAY
+    assert row["seconds_open_to_merged"] == 4 * _SECONDS_PER_DAY
+
+
+def test_pipeline_stages_nonmonotonic_rtm_before_mm_yields_null_delta() -> None:
+    """Rare ordering where RTM is applied before MM: the MM→RTM delta nulls
+    rather than going negative so log-scale plots don't choke."""
+    prs = _prs_pipeline(
+        [
+            {
+                "id": 3,
+                "gh_created_at": _dt(1),
+                "author_login": "alice",
+                "merged_at": _dt(10),
+            }
+        ]
+    )
+    ev = _events(
+        [
+            {
+                "pull_request_id": 3,
+                "occurred_at": _dt(2),
+                "type": "REVIEW_COMMENTED",
+                "label_name": None,
+                "actor_login": "bob",
+            },
+            {
+                "pull_request_id": 3,
+                "occurred_at": _dt(4),
+                "type": "LABELED",
+                "label_name": "ready-to-merge",
+                "actor_login": "bot",
+            },
+            {
+                "pull_request_id": 3,
+                "occurred_at": _dt(6),
+                "type": "LABELED",
+                "label_name": "maintainer-merge",
+                "actor_login": "bot",
+            },
+        ]
+    )
+    out = pipeline_stages(prs, ev)
+    row = out.row(0, named=True)
+    assert row["first_maintainer_merge_at"] == _dt(6)
+    assert row["first_ready_to_merge_at"] == _dt(4)
+    assert row["seconds_maintainer_merge_to_ready_to_merge"] is None
+    assert row["seconds_first_touch_to_maintainer_merge"] == 4 * _SECONDS_PER_DAY
+
+
+def test_pipeline_stages_returns_one_row_per_input_pr() -> None:
+    """PRs absent from events still appear with all-null stage columns."""
+    prs = _prs_pipeline(
+        [
+            {
+                "id": 10,
+                "gh_created_at": _dt(1),
+                "author_login": "alice",
+                "merged_at": None,
+            },
+            {
+                "id": 11,
+                "gh_created_at": _dt(1),
+                "author_login": "alice",
+                "merged_at": _dt(2),
+            },
+        ]
+    )
+    ev = _events([])
+    out = pipeline_stages(prs, ev).sort("pull_request_id")
+    assert out.height == 2
+    silent, merged = out.row(0, named=True), out.row(1, named=True)
+    assert silent["first_touch_at"] is None
+    assert silent["seconds_open_to_merged"] is None
+    # PR 11 has merged_at but no events → only open→merged is populated.
+    assert merged["seconds_open_to_merged"] == _SECONDS_PER_DAY
+    assert merged["seconds_open_to_first_touch"] is None
+
+
+def test_pipeline_stages_without_merged_column() -> None:
+    """Passing pr_merged_col=None yields a null merged_at_effective so the
+    helper works for "all candidate PRs" frames that haven't joined merge
+    metadata yet."""
+    prs = pl.DataFrame(
+        [{"id": 1, "gh_created_at": _dt(1), "author_login": "alice"}],
+        schema={
+            "id": pl.Int64,
+            "gh_created_at": pl.Datetime("us", "UTC"),
+            "author_login": pl.String,
+        },
+    )
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(2),
+                "type": "REVIEW_COMMENTED",
+                "label_name": None,
+                "actor_login": "bob",
+            },
+        ]
+    )
+    out = pipeline_stages(prs, ev, pr_merged_col=None)
+    row = out.row(0, named=True)
+    assert row["merged_at_effective"] is None
+    assert row["seconds_open_to_first_touch"] == _SECONDS_PER_DAY
+    assert row["seconds_ready_to_merge_to_merged"] is None
+    assert row["seconds_open_to_merged"] is None

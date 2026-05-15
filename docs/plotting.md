@@ -56,6 +56,26 @@ plot_hist_and_lognormal_fit_overlays(
 )
 ```
 
+## Why log-binning for durations
+
+PR durations across this repo (open-to-close, open-to-merge, per-stage
+deltas) are close to **log-normally distributed** — the original
+analysis is in `pr_open_durations.ipynb`, which fits lognormal /
+Weibull / log-logistic curves on geometric-spaced bins. The convention
+adopted across the marimo notebooks (Session 15 onward) is:
+
+- Bin edges via `np.logspace(np.log10(lo), np.log10(hi), bins + 1)`
+  with `lo = max(x.min(), nextafter(0, 1))` and `hi = x.max()`. Bin
+  centers are `sqrt(edges[:-1] * edges[1:])`.
+- Overlay a lognormal fit via `scipy.stats.lognorm.fit(x, floc=0)`
+  and plot `n * diff(lognorm.cdf(edges, ...))` as the expected counts.
+- Annotate the panel with `μ`, `σ`, median, and p90.
+
+The same recipe lives inside `plot_hist_and_lognormal_fit_overlays` and
+`plot_lognormal_fit_counts_logbins`; new notebooks that need per-cell
+control over layout can copy the recipe inline (see
+`marimo/anatomy_of_a_merge.py` §2 for the 4-panel grid pattern).
+
 ## Notes for tests/CI
 
 - Plot functions call `plt.show()`.

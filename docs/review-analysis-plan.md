@@ -155,6 +155,23 @@ These keep showing up in multiple themes and should be implemented once:
   doesn't emit `UNLABELED` events. Lives in
   `qb_notebook/review_states.py`. Reused by Themes 2, 4, and 5.
   ✅ shipped.
+- **`pipeline_stages(df_prs, df_events, *, asof=None, pr_merged_col="merged_at", ...)`** —
+  per-PR five-stage milestone frame: `opened_at`, `first_touch_at`,
+  `first_maintainer_merge_at`, `first_ready_to_merge_at`,
+  `merged_at_effective`, plus the four sequential stage deltas in
+  seconds (`seconds_open_to_first_touch` /
+  `seconds_first_touch_to_maintainer_merge` /
+  `seconds_maintainer_merge_to_ready_to_merge` /
+  `seconds_ready_to_merge_to_merged`) and the total
+  `seconds_open_to_merged`. Wraps `first_review_touch` +
+  `stage_timestamps` internally; non-monotonic deltas null rather
+  than going negative so log-scale plots stay clean. Caller supplies
+  the bors-aware merge timestamp (typically via
+  `pl.when(expr_merged_to_master()).then(expr_merged_at_effective()).otherwise(None)`
+  upstream). Lives in `qb_notebook/review_states.py`. Used by
+  Session 15 (`marimo/anatomy_of_a_merge.py`); ready for Story B
+  (latency decomposition) and Story F (bors queue health) which
+  need the same milestone backbone. ✅ shipped.
 - **`inline_comment_stats(df_inline, df_prs, *, bot_actors)`** —
   per-PR rollup of `syncer_prreviewinlinecomment` rows: total
   comments, comments-by-others (author + bots excluded — the
@@ -223,7 +240,8 @@ code.
 | 12      | Gap: inline-comment depth        | `inline_comment_stats` helper + §9 in `bottleneck_localization.py` | shipped |
 | 13      | Gap: delegated-merge path        | §8 in `review_state_machine.py` + `DEFAULT_BOT_ACTORS` bot-list fix | shipped |
 | 14      | Gap: time-of-day / seasonality   | `marimo/temporal_patterns.py` + `qb_notebook/temporal.py`       | shipped  |
-| 15+     | Gaps & stories                   | see [backlog](review-analysis/backlog.md)                       | planned  |
+| 15      | Story A: anatomy of a merge      | `marimo/anatomy_of_a_merge.py` + `pipeline_stages` helper       | shipped  |
+| 16+     | Gaps & stories                   | see [backlog](review-analysis/backlog.md)                       | planned  |
 
 Order is flexible — Themes 1 and 2 were the highest-value starting points;
 the post-Theme-5 sessions (6+) are cleanups and cross-cuts unlocked by the
