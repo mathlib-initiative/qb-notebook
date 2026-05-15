@@ -23,10 +23,14 @@ review event shortly before the label was applied,
 non-bot review/comment event per PR for first-touch-latency analyses,
 :func:`label_overlap_seconds`, a generic per-PR interval-vs-window
 overlap helper used wherever a "did state X cover interval Y" question
-shows up, and :func:`labels_active_at`, which given a set of
+shows up, :func:`labels_active_at`, which given a set of
 ``(pull_request_id, timestamp)`` points returns the label intervals
 that were active at each point — the "which area / state was this PR
-in when event E fired" lookup used by per-area attribution.
+in when event E fired" lookup used by per-area attribution, and
+:func:`inline_comment_stats`, which rolls
+``syncer_prreviewinlinecomment`` rows up to per-PR review-depth
+counts (comments, threads, distinct non-author reviewers, files
+touched) for the inline-comment-volume cross-cuts.
 """
 
 from __future__ import annotations
@@ -556,6 +560,99 @@ def first_review_touch(
             "first_touch_event_type",
             "first_touch_seconds_from_open",
         )
+    )
+
+
+def inline_comment_stats(
+    df_inline: pl.DataFrame,
+    df_prs: pl.DataFrame,
+    *,
+    bot_actors: Iterable[str] = DEFAULT_BOT_ACTORS,
+    pr_id_col: str = "id",
+    pr_author_col: str = "author_login",
+) -> pl.DataFrame:
+    """Per-PR aggregates over inline review comments.
+
+    ``syncer_prreviewinlinecomment.parquet`` is one row per inline
+    review comment (loaded as ``data["inline_comments"]`` when present).
+    Comment **bodies are not exported** — only metadata + actor +
+    timestamps. This helper rolls those rows up to per-PR depth signals
+    suitable for cuts by ``lines_bucket`` / ``pr_type`` and correlation
+    with end-to-end TTM or ping-pong cycle counts.
+
+    ``df_prs`` is used only to attribute self-comments: the per-PR
+    author login is joined in, lowercased, and excluded from the
+    "by others" counts. Like :func:`first_review_touch`, the author
+    login is not on ``syncer_pullrequest`` natively — join
+    ``core_user.github_login`` onto ``prs.author_id`` upstream first.
+
+    Returned columns (one row per PR with at least one inline comment;
+    PRs with none are absent — left-join + ``fill_null(0)`` to attach):
+
+    - ``pull_request_id``
+    - ``n_inline_comments`` — raw count of comments on the PR.
+    - ``n_inline_comments_by_others`` — comments excluding the PR
+      author and known bots. The headline "review depth" signal.
+    - ``n_inline_threads`` — distinct ``thread_root_node_id`` values
+      (one per conversation; replies don't add a new thread).
+    - ``n_inline_thread_replies`` — comments whose ``reply_to_node_id``
+      is non-null (back-and-forth volume within threads).
+    - ``n_inline_authors`` — distinct non-author non-bot logins.
+    - ``n_inline_files`` — distinct ``path`` values touched by inline
+      comments.
+    - ``first_inline_at`` / ``last_inline_at`` — earliest / latest
+      ``gh_created_at`` over the PR's inline comments.
+    """
+    bots_lc = [b.lower() for b in bot_actors]
+
+    pr_keys = df_prs.select(
+        pl.col(pr_id_col).alias("pull_request_id"),
+        pl.col(pr_author_col).str.to_lowercase().alias("_author_lc"),
+    )
+
+    enriched = (
+        df_inline.drop_nulls(["pull_request_id"])
+        .with_columns(pl.col("author_login").str.to_lowercase().alias("_actor_lc"))
+        .join(pr_keys, on="pull_request_id", how="left")
+        .with_columns(
+            (
+                pl.col("_actor_lc").is_not_null()
+                & ~pl.col("_actor_lc").is_in(bots_lc)
+                & (
+                    pl.col("_author_lc").is_null()
+                    | (pl.col("_actor_lc") != pl.col("_author_lc"))
+                )
+            ).alias("_is_other"),
+        )
+    )
+
+    return (
+        enriched.group_by("pull_request_id")
+        .agg(
+            pl.len().cast(pl.Int64).alias("n_inline_comments"),
+            pl.col("_is_other")
+            .sum()
+            .cast(pl.Int64)
+            .alias("n_inline_comments_by_others"),
+            pl.col("thread_root_node_id")
+            .n_unique()
+            .cast(pl.Int64)
+            .alias("n_inline_threads"),
+            pl.col("reply_to_node_id")
+            .is_not_null()
+            .sum()
+            .cast(pl.Int64)
+            .alias("n_inline_thread_replies"),
+            pl.col("author_login")
+            .filter(pl.col("_is_other"))
+            .n_unique()
+            .cast(pl.Int64)
+            .alias("n_inline_authors"),
+            pl.col("path").n_unique().cast(pl.Int64).alias("n_inline_files"),
+            pl.col("gh_created_at").min().alias("first_inline_at"),
+            pl.col("gh_created_at").max().alias("last_inline_at"),
+        )
+        .sort("pull_request_id")
     )
 
 

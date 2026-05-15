@@ -155,6 +155,22 @@ These keep showing up in multiple themes and should be implemented once:
   doesn't emit `UNLABELED` events. Lives in
   `qb_notebook/review_states.py`. Reused by Themes 2, 4, and 5.
   ✅ shipped.
+- **`inline_comment_stats(df_inline, df_prs, *, bot_actors)`** —
+  per-PR rollup of `syncer_prreviewinlinecomment` rows: total
+  comments, comments-by-others (author + bots excluded — the
+  headline review-depth signal), distinct threads
+  (`thread_root_node_id`), thread replies, distinct non-author
+  reviewers, distinct files touched, first/last inline comment
+  timestamps. Comment bodies aren't exported so this is the
+  best *substantive* review-depth proxy the dataset offers. Follows
+  the `first_review_touch` pattern: `df_prs` carries
+  `author_login` (join `core_user.github_login` upstream); author
+  comparison is case-insensitive. PRs with no inline comments are
+  absent from the output. Lives in `qb_notebook/review_states.py`.
+  Used by Session 12 (Section 9 of `bottleneck_localization.py`);
+  ready for Stories A (anatomy of a merge — n_inline_files is a
+  diff-coverage proxy) and C (anatomy of a stuck PR — same cuts on
+  open / closed-unmerged cohorts). ✅ shipped.
 - **PR-shape helpers in `qb_notebook/pr_shape.py`** —
   `size_buckets(df_prs)` adds `lines_changed` / `lines_bucket` /
   `files_bucket`; `author_cohort(df_prs)` adds `author_first_pr_at` /
@@ -189,7 +205,8 @@ code.
 | 9       | Theme 2/5: tier + WIP follow-ups | active-reviewer trend by team; `had_wip_label_at_open` cut      | shipped  |
 | 10      | Plot-site polish                 | promote best plots from each notebook                           | planned  |
 | 11      | Gap: first-touch latency         | `first_review_touch` helper + section in `reviewer_load.py`     | shipped  |
-| 12+     | Gaps & stories                   | see [backlog](review-analysis/backlog.md)                       | planned  |
+| 12      | Gap: inline-comment depth        | `inline_comment_stats` helper + §9 in `bottleneck_localization.py` | shipped |
+| 13+     | Gaps & stories                   | see [backlog](review-analysis/backlog.md)                       | planned  |
 
 Order is flexible — Themes 1 and 2 were the highest-value starting points;
 the post-Theme-5 sessions (6+) are cleanups and cross-cuts unlocked by the

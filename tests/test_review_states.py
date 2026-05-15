@@ -6,6 +6,7 @@ from qb_notebook.review_states import (
     MATHLIB_LABEL_RETIRED_AT,
     attribute_label_events,
     first_review_touch,
+    inline_comment_stats,
     label_intervals,
     label_overlap_seconds,
     labels_active_at,
@@ -1552,3 +1553,202 @@ def test_queue_window_intervals_overlap_with_label_overlap_seconds() -> None:
     out = label_overlap_seconds(intervals, windows)
     assert out["overlap_seconds"].to_list() == [86400.0]
     assert out["had_overlap"].to_list() == [True]
+
+
+# --- inline_comment_stats ----------------------------------------------------
+
+
+def _inline(rows: list[dict]) -> pl.DataFrame:
+    """Build an inline-comment frame with the columns inline_comment_stats reads."""
+    return pl.DataFrame(
+        rows,
+        schema={
+            "pull_request_id": pl.Int64,
+            "author_login": pl.String,
+            "gh_created_at": pl.Datetime("us", "UTC"),
+            "path": pl.String,
+            "thread_root_node_id": pl.String,
+            "reply_to_node_id": pl.String,
+        },
+    )
+
+
+def _prs(rows: list[dict]) -> pl.DataFrame:
+    return pl.DataFrame(
+        rows,
+        schema={"id": pl.Int64, "author_login": pl.String},
+    )
+
+
+def test_inline_comment_stats_counts_threads_and_authors() -> None:
+    inline = _inline(
+        [
+            # PR 1: alice opens a thread, bob replies; charlie opens another thread
+            {
+                "pull_request_id": 1,
+                "author_login": "alice",
+                "gh_created_at": _dt(1, 10),
+                "path": "a.lean",
+                "thread_root_node_id": "T1",
+                "reply_to_node_id": None,
+            },
+            {
+                "pull_request_id": 1,
+                "author_login": "bob",
+                "gh_created_at": _dt(1, 11),
+                "path": "a.lean",
+                "thread_root_node_id": "T1",
+                "reply_to_node_id": "T1",
+            },
+            {
+                "pull_request_id": 1,
+                "author_login": "charlie",
+                "gh_created_at": _dt(1, 12),
+                "path": "b.lean",
+                "thread_root_node_id": "T2",
+                "reply_to_node_id": None,
+            },
+        ]
+    )
+    prs = _prs([{"id": 1, "author_login": "dave"}])  # author is none of the reviewers
+    out = inline_comment_stats(inline, prs)
+    assert out.height == 1
+    row = out.row(0, named=True)
+    assert row["pull_request_id"] == 1
+    assert row["n_inline_comments"] == 3
+    assert row["n_inline_comments_by_others"] == 3
+    assert row["n_inline_threads"] == 2
+    assert row["n_inline_thread_replies"] == 1
+    assert row["n_inline_authors"] == 3
+    assert row["n_inline_files"] == 2
+    assert row["first_inline_at"] == _dt(1, 10)
+    assert row["last_inline_at"] == _dt(1, 12)
+
+
+def test_inline_comment_stats_excludes_author_and_bots() -> None:
+    inline = _inline(
+        [
+            # Author's own inline comment — not "by others".
+            {
+                "pull_request_id": 7,
+                "author_login": "Alice",  # uppercase to test case-insensitivity
+                "gh_created_at": _dt(2, 9),
+                "path": "a.lean",
+                "thread_root_node_id": "T1",
+                "reply_to_node_id": None,
+            },
+            # Bot — excluded from "by others" and from author count.
+            {
+                "pull_request_id": 7,
+                "author_login": "github-actions",
+                "gh_created_at": _dt(2, 10),
+                "path": "a.lean",
+                "thread_root_node_id": "T2",
+                "reply_to_node_id": None,
+            },
+            # Reviewer — counts.
+            {
+                "pull_request_id": 7,
+                "author_login": "bob",
+                "gh_created_at": _dt(2, 11),
+                "path": "a.lean",
+                "thread_root_node_id": "T3",
+                "reply_to_node_id": None,
+            },
+        ]
+    )
+    prs = _prs([{"id": 7, "author_login": "alice"}])
+    out = inline_comment_stats(inline, prs)
+    row = out.row(0, named=True)
+    assert row["n_inline_comments"] == 3
+    assert row["n_inline_comments_by_others"] == 1
+    assert row["n_inline_authors"] == 1  # only bob
+    assert row["n_inline_threads"] == 3
+
+
+def test_inline_comment_stats_omits_prs_with_no_comments() -> None:
+    inline = _inline(
+        [
+            {
+                "pull_request_id": 1,
+                "author_login": "bob",
+                "gh_created_at": _dt(1),
+                "path": "a.lean",
+                "thread_root_node_id": "T1",
+                "reply_to_node_id": None,
+            },
+        ]
+    )
+    prs = _prs(
+        [
+            {"id": 1, "author_login": "alice"},
+            {"id": 2, "author_login": "alice"},  # has no comments
+        ]
+    )
+    out = inline_comment_stats(inline, prs)
+    assert out["pull_request_id"].to_list() == [1]
+
+
+def test_inline_comment_stats_groups_by_pr() -> None:
+    inline = _inline(
+        [
+            {
+                "pull_request_id": 1,
+                "author_login": "bob",
+                "gh_created_at": _dt(1, 9),
+                "path": "a.lean",
+                "thread_root_node_id": "T1",
+                "reply_to_node_id": None,
+            },
+            {
+                "pull_request_id": 2,
+                "author_login": "bob",
+                "gh_created_at": _dt(1, 10),
+                "path": "b.lean",
+                "thread_root_node_id": "T2",
+                "reply_to_node_id": None,
+            },
+            {
+                "pull_request_id": 2,
+                "author_login": "carol",
+                "gh_created_at": _dt(1, 11),
+                "path": "b.lean",
+                "thread_root_node_id": "T2",
+                "reply_to_node_id": "T2",
+            },
+        ]
+    )
+    prs = _prs(
+        [
+            {"id": 1, "author_login": "alice"},
+            {"id": 2, "author_login": "alice"},
+        ]
+    )
+    out = inline_comment_stats(inline, prs).sort("pull_request_id")
+    assert out["pull_request_id"].to_list() == [1, 2]
+    assert out["n_inline_comments"].to_list() == [1, 2]
+    assert out["n_inline_thread_replies"].to_list() == [0, 1]
+    assert out["n_inline_authors"].to_list() == [1, 2]
+
+
+def test_inline_comment_stats_orphan_pr_treats_all_as_others() -> None:
+    """Comments on a PR not in df_prs lose the author exclusion (null author),
+    so every non-bot comment counts as "by others"."""
+    inline = _inline(
+        [
+            {
+                "pull_request_id": 99,
+                "author_login": "bob",
+                "gh_created_at": _dt(1),
+                "path": "a.lean",
+                "thread_root_node_id": "T1",
+                "reply_to_node_id": None,
+            },
+        ]
+    )
+    prs = _prs([])  # no PRs known
+    out = inline_comment_stats(inline, prs)
+    row = out.row(0, named=True)
+    assert row["n_inline_comments"] == 1
+    assert row["n_inline_comments_by_others"] == 1
+    assert row["n_inline_authors"] == 1

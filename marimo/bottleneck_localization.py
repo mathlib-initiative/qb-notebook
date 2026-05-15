@@ -60,6 +60,7 @@ def _():
         size_buckets,
     )
     from qb_notebook.review_states import (
+        inline_comment_stats,
         label_intervals,
         label_overlap_seconds,
         labels_active_at,
@@ -71,6 +72,7 @@ def _():
         Path,
         bucket_labels,
         datetime,
+        inline_comment_stats,
         label_intervals,
         label_overlap_seconds,
         labels_active_at,
@@ -89,10 +91,25 @@ def _():
 def _(Path, datetime, load_pr_interval_data, pl, timezone):
     _data_dir = Path(__file__).resolve().parents[1] / "data"
     data = load_pr_interval_data(_data_dir)
-    prs = data["prs"]
+    prs_raw = data["prs"]
     events = data["events"]
     queue_windows = data["queue_windows"]
     label_defs = data["label_defs"]
+    # core_user isn't part of load_pr_interval_data; map author_id ->
+    # github_login so Section 9 can exclude self-comments when rolling up
+    # inline-review-comment volume.
+    _users = pl.read_parquet(_data_dir / "core_user.parquet")
+    prs = prs_raw.join(
+        _users.select(
+            pl.col("id").alias("author_id"),
+            pl.col("github_login").alias("author_login"),
+        ),
+        on="author_id",
+        how="left",
+    )
+    # Optional: present only when the artifact carries inline review
+    # comments (post-#164 ingest). Section 9 cells guard on this.
+    inline_comments = data.get("inline_comments")
     asof = datetime.now(tz=timezone.utc)
     # Threaded into every `label_intervals` call below. GitHub does not
     # auto-remove labels when a PR is closed (bors-merged or otherwise);
@@ -100,7 +117,15 @@ def _(Path, datetime, load_pr_interval_data, pl, timezone):
     # open intervals on this artifact, only 32 of which are actually on
     # PRs that are still open.
     pr_close = prs.select(pl.col("id").alias("pull_request_id"), "closed_at")
-    return asof, events, label_defs, pr_close, prs, queue_windows
+    return (
+        asof,
+        events,
+        inline_comments,
+        label_defs,
+        pr_close,
+        prs,
+        queue_windows,
+    )
 
 
 @app.cell
@@ -739,6 +764,247 @@ def _(flags_area, mo, pl):
     )
     mo.md("### Stall signals & latency by topic area (n ≥ 20)")
     signal_by_area
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 9. Inline-comment review depth (Session 12)
+
+    `syncer_prreviewinlinecomment` is the only *substantive* review
+    signal in the dataset — comment bodies aren't exported, but per-PR
+    counts of inline comments, distinct threads, and distinct reviewers
+    are a proxy for how much back-and-forth a PR generated. We expect
+    review depth to climb with size / type and to correlate with the
+    approved-to-merge latency tail.
+
+    "By others" excludes the PR author and known bots so the metric
+    reflects *external* engagement rather than the author marking up
+    their own diff. Restricted to the approved-and-merged cohort
+    (`first_mm` from Section 1) so the latency cuts are comparable.
+    """)
+    return
+
+
+@app.cell
+def _(first_mm, inline_comment_stats, inline_comments, pl, prs):
+    """Per-PR inline-comment aggregates joined onto the approved-and-merged
+    cohort. PRs with no inline comments get zeroed counts."""
+    if inline_comments is None:
+        inline_cohort = first_mm.head(0).with_columns(
+            pl.lit(0, dtype=pl.Int64).alias("n_inline_comments"),
+            pl.lit(0, dtype=pl.Int64).alias("n_inline_comments_by_others"),
+            pl.lit(0, dtype=pl.Int64).alias("n_inline_authors"),
+            pl.lit(0, dtype=pl.Int64).alias("n_inline_threads"),
+            pl.lit(0, dtype=pl.Int64).alias("n_inline_files"),
+        )
+    else:
+        _stats = inline_comment_stats(inline_comments, prs)
+        _fill_cols = (
+            "n_inline_comments",
+            "n_inline_comments_by_others",
+            "n_inline_authors",
+            "n_inline_threads",
+            "n_inline_files",
+        )
+        inline_cohort = first_mm.join(
+            _stats, on="pull_request_id", how="left"
+        ).with_columns([pl.col(_c).fill_null(0) for _c in _fill_cols])
+    return (inline_cohort,)
+
+
+@app.cell
+def _(inline_cohort, mo, pl):
+    """Headline coverage + distribution of comments-by-others over the
+    approved-and-merged cohort."""
+    _summary = inline_cohort.select(
+        pl.len().alias("approved & merged PRs"),
+        (pl.col("n_inline_comments_by_others") > 0)
+        .sum()
+        .alias("any inline (by others)"),
+        pl.col("n_inline_comments_by_others").median().alias("median comments"),
+        pl.col("n_inline_comments_by_others").quantile(0.75).alias("p75"),
+        pl.col("n_inline_comments_by_others").quantile(0.9).alias("p90"),
+        pl.col("n_inline_comments_by_others").max().alias("max"),
+        pl.col("n_inline_authors").median().alias("median distinct reviewers"),
+        pl.col("n_inline_authors").quantile(0.9).alias("p90 distinct reviewers"),
+    )
+    mo.md("### Inline-comment volume — approved & merged cohort")
+    _summary
+    return
+
+
+@app.cell
+def _(inline_cohort, pl):
+    """Comment-volume buckets used for the latency / cycle cuts below.
+    Cutoffs chosen to match the smoke-test deciles (0 vs sparse vs
+    typical-review vs deep-discussion vs runaway-thread)."""
+    inline_buckets = inline_cohort.with_columns(
+        pl.when(pl.col("n_inline_comments_by_others") == 0)
+        .then(pl.lit("0"))
+        .when(pl.col("n_inline_comments_by_others") <= 2)
+        .then(pl.lit("1-2"))
+        .when(pl.col("n_inline_comments_by_others") <= 5)
+        .then(pl.lit("3-5"))
+        .when(pl.col("n_inline_comments_by_others") <= 10)
+        .then(pl.lit("6-10"))
+        .otherwise(pl.lit("11+"))
+        .alias("comment_bucket")
+    )
+    return (inline_buckets,)
+
+
+@app.cell
+def _(inline_buckets, mo, pl):
+    """Approved-to-merge latency by comment volume. The headline cross-cut
+    — does heavier inline-review actually correlate with a longer
+    approved-to-merge tail?"""
+    _order = ["0", "1-2", "3-5", "6-10", "11+"]
+    latency_by_comments = (
+        inline_buckets.group_by("comment_bucket")
+        .agg(
+            pl.len().alias("n"),
+            pl.col("mm_to_merge_days").median().alias("median mm→merge (d)"),
+            pl.col("mm_to_merge_days").quantile(0.75).alias("p75 (d)"),
+            pl.col("mm_to_merge_days").quantile(0.9).alias("p90 (d)"),
+        )
+        .with_columns(pl.col("comment_bucket").cast(pl.Enum(_order)).alias("_o"))
+        .sort("_o")
+        .drop("_o")
+    )
+    mo.md("### Approved-to-merge latency by inline-comment volume")
+    latency_by_comments
+    return
+
+
+@app.cell
+def _(inline_buckets, np, pl, plt):
+    """Same table as a boxplot, ≤14d clip to mirror Section 2."""
+    _order = ["0", "1-2", "3-5", "6-10", "11+"]
+    _data = [
+        inline_buckets.filter(pl.col("comment_bucket") == _b)[
+            "mm_to_merge_days"
+        ].to_numpy()
+        for _b in _order
+    ]
+    _fig, _ax = plt.subplots(figsize=(9, 4))
+    _ax.boxplot(
+        [_d[_d <= 14] for _d in _data],
+        tick_labels=_order,
+        showfliers=False,
+        widths=0.6,
+    )
+    _ax.set_ylabel("mm → merge (days, ≤14d shown)")
+    _ax.set_xlabel("Inline comments by others (bucket)")
+    _ax.set_title("Approved-to-merge latency by inline-comment volume")
+    _ax.grid(axis="y", alpha=0.3)
+    for _i, _d in enumerate(_data):
+        _ax.text(
+            _i + 1, _ax.get_ylim()[1] * 0.92, f"n={len(_d)}", ha="center", fontsize=8
+        )
+    _ = np
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _(cohort_bounces, inline_cohort, mo, pl):
+    """Ping-pong (queue-cycle) correlation: do PRs that bounced the bors
+    queue more times also tend to attract more inline review? Joins the
+    Section 3 `cohort_bounces` frame with the inline stats."""
+    inline_by_cycles = (
+        cohort_bounces.join(
+            inline_cohort.select(
+                "pull_request_id",
+                "n_inline_comments_by_others",
+                "n_inline_authors",
+                "n_inline_threads",
+            ),
+            on="pull_request_id",
+            how="inner",
+        )
+        .group_by("queue_cycles")
+        .agg(
+            pl.len().alias("n"),
+            pl.col("n_inline_comments_by_others").median().alias("median comments"),
+            pl.col("n_inline_comments_by_others").quantile(0.9).alias("p90 comments"),
+            pl.col("n_inline_authors").median().alias("median reviewers"),
+            pl.col("n_inline_threads").median().alias("median threads"),
+        )
+        .sort("queue_cycles")
+    )
+    mo.md("### Inline-comment volume conditional on queue cycles")
+    inline_by_cycles
+    return
+
+
+@app.cell
+def _(
+    DEFAULT_LINES_BREAKS,
+    bucket_labels,
+    inline_buckets,
+    mo,
+    pl,
+    pr_type,
+    prs,
+    size_buckets,
+):
+    """Inline-comment volume × `lines_bucket` and × `pr_type`. Re-decorate
+    the inline-comment cohort with shape; we can't reuse `flags_shape`
+    here because Section 9 covers PRs that may not have stall flags
+    computed."""
+    _shape = pr_type(size_buckets(prs)).select(
+        pl.col("id").alias("pull_request_id"),
+        "lines_bucket",
+        "pr_type",
+    )
+    inline_shape = inline_buckets.join(_shape, on="pull_request_id", how="left")
+    _bucket_order = bucket_labels(DEFAULT_LINES_BREAKS)
+    inline_by_lines = (
+        inline_shape.filter(pl.col("lines_bucket").is_not_null())
+        .group_by("lines_bucket")
+        .agg(
+            pl.len().alias("n"),
+            pl.col("n_inline_comments_by_others").median().alias("median comments"),
+            pl.col("n_inline_comments_by_others").quantile(0.9).alias("p90 comments"),
+            (pl.col("n_inline_comments_by_others") > 0)
+            .mean()
+            .alias("share any inline"),
+            pl.col("n_inline_authors").median().alias("median reviewers"),
+        )
+        .with_columns(pl.col("lines_bucket").cast(pl.Enum(_bucket_order)).alias("_o"))
+        .sort("_o")
+        .drop("_o")
+    )
+    mo.md("### Inline-comment volume by lines_bucket")
+    inline_by_lines
+    return (inline_shape,)
+
+
+@app.cell
+def _(DEFAULT_PR_TYPES, inline_shape, mo, pl):
+    """Same table by `pr_type`. Includes `other` / `unparsed`."""
+    _types = list(DEFAULT_PR_TYPES) + ["other", "unparsed"]
+    inline_by_type = (
+        inline_shape.filter(pl.col("pr_type").is_not_null())
+        .group_by("pr_type")
+        .agg(
+            pl.len().alias("n"),
+            pl.col("n_inline_comments_by_others").median().alias("median comments"),
+            pl.col("n_inline_comments_by_others").quantile(0.9).alias("p90 comments"),
+            (pl.col("n_inline_comments_by_others") > 0)
+            .mean()
+            .alias("share any inline"),
+            pl.col("n_inline_authors").median().alias("median reviewers"),
+        )
+        .with_columns(pl.col("pr_type").cast(pl.Enum(_types)).alias("_o"))
+        .sort("_o")
+        .drop("_o")
+    )
+    mo.md("### Inline-comment volume by pr_type")
+    inline_by_type
     return
 
 

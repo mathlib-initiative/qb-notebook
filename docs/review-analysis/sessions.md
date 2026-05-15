@@ -295,3 +295,103 @@ no-event PRs, per-PR isolation, and the `event_types` parameter.
   cycles) — which Theme 5 already documented. **Updates the
   newcomer-experience story (D) framing** to focus on the funnel
   beyond first-touch.
+
+## Session 12 — inline-comment review depth (gap) — shipped
+
+**Question**: `syncer_prreviewinlinecomment.parquet` is the only
+*substantive* review signal in the dataset (bodies aren't exported,
+but per-PR counts of inline comments + distinct reviewers + threads
+proxy how much back-and-forth a PR generated). Does inline-review
+depth correlate with the approved-to-merge latency tail and with
+shape (`lines_bucket` / `pr_type`)?
+
+**Helper**: `inline_comment_stats(df_inline, df_prs, *, bot_actors,
+pr_id_col, pr_author_col)` in `qb_notebook/review_states.py`. Returns
+one row per PR with at least one inline comment, with columns
+`n_inline_comments`, `n_inline_comments_by_others` (excludes the PR
+author + known bots — the headline depth signal), `n_inline_threads`
+(distinct `thread_root_node_id`), `n_inline_thread_replies`,
+`n_inline_authors`, `n_inline_files`, `first_inline_at`,
+`last_inline_at`. PRs with no inline comments are absent — left-join
++ `fill_null(0)` to attach. Follows the `df_prs + author exclusion`
+pattern of `first_review_touch`. Five unit tests cover thread
+counting, author/bot exclusion (case-insensitive), no-comments
+absence, multi-PR grouping, and the orphan-PR-no-author edge case.
+
+**Wired into `marimo/bottleneck_localization.py`** as a new
+**Section 9 — Inline-comment review depth**, restricted to the
+approved-and-merged cohort (`first_mm` from Section 1) so the
+latency cuts are directly comparable to the existing stall-signal
+sections:
+
+1. Coverage + headline-distribution summary table.
+2. `comment_bucket` (0 / 1-2 / 3-5 / 6-10 / 11+) × `mm_to_merge_days`
+   median / p75 / p90 table + boxplot (≤14d clip).
+3. Cycles-vs-comments table joining the Section-3 `cohort_bounces`
+   frame — does ping-pong correlate with deeper inline review?
+4. Comment volume × `lines_bucket` (median / p90 / share-any /
+   median reviewers).
+5. Comment volume × `pr_type` (same shape, includes
+   `other`/`unparsed`).
+
+The data-load cell now also joins `core_user.github_login` onto
+`prs.author_id` (matching `marimo/reviewer_load.py`) so the helper
+can exclude self-comments. `inline_comments` is loaded optionally
+(`data.get("inline_comments")`); the Section 9 cells degrade
+gracefully when the parquet file isn't present in the artifact.
+
+**Empirical findings on the current artifact** (approved & merged
+cohort, n=8 053; ~51.6 % had at least one by-others inline
+comment):
+
+- **Headline distribution**: median 1 comment-by-others, p75 3, p90
+  10, max 111. Median 1 distinct reviewer per PR; p90 = 2 reviewers.
+  Inline review is sparse — most approved PRs get nothing on the
+  diff, and the headline metric is dominated by the long tail.
+- **Latency × comments — the headline result**: clean ~5×
+  monotonic gradient.
+
+  | comments | n    | median mm→merge (d) | p90 (d) |
+  | -------- | ---- | ------------------- | ------- |
+  | 0        | 3899 | 0.18                | 2.76    |
+  | 1-2      | 1815 | 0.42                | 4.14    |
+  | 3-5      | 932  | 0.54                | 4.87    |
+  | 6-10     | 659  | 0.77                | 7.11    |
+  | 11+      | 748  | 0.92                | 13.00   |
+
+  Inline-comment volume is a substantial predictor of the
+  approved-to-merge tail — heavier inline-review PRs sit in the
+  bors queue ~5× longer at both the median and the p90.
+- **Ping-pong correlation**: median comments-by-others climbs
+  0 (queue_cycles ≤ 1) → 1 (cycles=2) → 2 (cycles=3) → 4.5
+  (cycles=4) → 8 (cycles=5). Heavier bors-queue bouncing is
+  strongly correlated with deeper inline review, as expected — the
+  two are likely both reflecting the same underlying "this PR needs
+  another pass" signal.
+- **Shape × comments — `lines_bucket`**: share-any-inline climbs
+  22 % (0-10) → 45 % (11-50) → 66 % (51-200) → **73 % (201-1000)**
+  → 63 % (1001+). Same "1001+ slightly lower than 201-1000"
+  inversion as TTM / first-touch. Median comments-by-others:
+  0 / 0 / 2 / 4 / 1 — the 1001+ median is surprisingly low, again
+  consistent with "very-large PRs get fast-tracked".
+- **Shape × comments — `pr_type`**: `feat:` is the clear outlier —
+  median 2 comments-by-others, p90 15, share-any-inline **68 %**
+  (n=4 183). Housekeeping types are uniformly low: `chore:`
+  median 0 / share-any 31 %, `fix:` median 0 / 29 %, `doc:`
+  median 0 / 32 %. `refactor:` median 1 / 55 % sits between.
+  `feat:` PRs attract ~2-3× more inline review than `chore:`,
+  matching Session 11's first-touch finding that `feat:` is the
+  slowest type by ~22×.
+
+**Notes / open follow-ups**:
+
+- Section 9 lives on the approved-and-merged cohort; the helper
+  itself returns one row per PR regardless of state, so a future
+  session could trivially run the same cuts on the open-PR backlog
+  or on closed-unmerged PRs (the latter is interesting for Story C).
+- "Files touched by inline comments" (`n_inline_files`) is exposed
+  but unused in the current cells; potentially useful as a
+  diff-coverage signal in Story A (anatomy of a merge).
+- Inline comments coverage backfills to 2021-06-03, so there's no
+  censoring window — the gradient above is robust over the full
+  history.

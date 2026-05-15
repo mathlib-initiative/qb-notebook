@@ -2,7 +2,7 @@
 
 Prioritized future work. Picking up new work? Start here.
 
-A survey after the five themes + Sessions 6-11 surfaced two buckets:
+A survey after the five themes + Sessions 6-12 surfaced two buckets:
 
 - **Gaps**: small/medium follow-ups that close a specific blind spot.
   Ship through autonomously; pause for review only if a major design
@@ -25,11 +25,11 @@ In rough priority order (highest leverage / smallest first):
 
 1. ~~First-touch latency~~ — **shipped as Session 11**
    ([`sessions.md`](sessions.md#session-11--first-touch-latency-gap--shipped)).
-2. **Inline-comment review-depth signal** —
-   `syncer_prreviewinlinecomment.parquet` is loaded by `data_io` but no
-   theme touches it. Per-PR comment volume, cuts by `lines_bucket` /
-   `pr_type`, correlation with TTM and ping-pong. Only proxy for
-   *substantive* review the dataset has (bodies aren't exported).
+2. ~~Inline-comment review-depth signal~~ — **shipped as Session 12**
+   ([`sessions.md`](sessions.md#session-12--inline-comment-review-depth-gap--shipped)).
+   Helper `inline_comment_stats` + Section 9 cells in
+   `bottleneck_localization.py`. Inline-comment volume × approved-to-merge
+   latency has a clean ~5× monotonic gradient (0 → 11+ comments-by-others).
 3. **Approval-source disagreement** — `prs.approvals` (GitHub-native)
    has ~52 % coverage on maintainer-merged PRs. Characterize the
    non-overlap: native approvals without `maintainer-merge` label, and
