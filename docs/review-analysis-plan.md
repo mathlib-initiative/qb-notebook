@@ -171,6 +171,21 @@ These keep showing up in multiple themes and should be implemented once:
   ready for Stories A (anatomy of a merge — n_inline_files is a
   diff-coverage proxy) and C (anatomy of a stuck PR — same cuts on
   open / closed-unmerged cohorts). ✅ shipped.
+- **Temporal helpers in `qb_notebook/temporal.py`** —
+  `with_temporal_columns(df, ts_col, *, prefix="")` adds UTC
+  `hour_utc` / `weekday` (0=Mon, 6=Sun) / `is_weekend` / `month` /
+  `year` / `year_month` derivations from any datetime column;
+  `weekday_hour_histogram(df, *, ts_col)` produces the dense
+  7×24 = 168-cell zero-filled count frame heatmaps render off;
+  `actor_activity_window(events, *, window_hours=8, min_events=20)`
+  infers each actor's best contiguous UTC activity window
+  (returns `peak_hour`, `window_start`, `window_end`,
+  `active_hours: list[int]`, `active_hours_share`); and
+  `hour_set_overlap(a, b)` is the trivial pairwise comparator.
+  Plus `WEEKDAY_LABELS` / `MONTH_LABELS` / `WEEKEND_DAYS` constants.
+  Used by Session 14 (`marimo/temporal_patterns.py`); ready for
+  Story B (latency decomposition — when do queue-stalls cluster?)
+  and any future seasonality cut on Themes 2-5. ✅ shipped.
 - **PR-shape helpers in `qb_notebook/pr_shape.py`** —
   `size_buckets(df_prs)` adds `lines_changed` / `lines_bucket` /
   `files_bucket`; `author_cohort(df_prs)` adds `author_first_pr_at` /
@@ -207,7 +222,8 @@ code.
 | 11      | Gap: first-touch latency         | `first_review_touch` helper + section in `reviewer_load.py`     | shipped  |
 | 12      | Gap: inline-comment depth        | `inline_comment_stats` helper + §9 in `bottleneck_localization.py` | shipped |
 | 13      | Gap: delegated-merge path        | §8 in `review_state_machine.py` + `DEFAULT_BOT_ACTORS` bot-list fix | shipped |
-| 14+     | Gaps & stories                   | see [backlog](review-analysis/backlog.md)                       | planned  |
+| 14      | Gap: time-of-day / seasonality   | `marimo/temporal_patterns.py` + `qb_notebook/temporal.py`       | shipped  |
+| 15+     | Gaps & stories                   | see [backlog](review-analysis/backlog.md)                       | planned  |
 
 Order is flexible — Themes 1 and 2 were the highest-value starting points;
 the post-Theme-5 sessions (6+) are cleanups and cross-cuts unlocked by the

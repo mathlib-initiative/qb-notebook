@@ -54,9 +54,16 @@ In rough priority order (highest leverage / smallest first):
    where `mathlib-bors` / `bors` / `leanprover-radar` weren't excluded,
    which had been mis-attributing ~98 % of `delegated` and ~1 % of
    `ready-to-merge` events.
-8. **Time-of-day / timezone patterns** — global community, no
-   time-of-day analysis yet. Review-desert windows, weekend latency,
-   author/reviewer activity-window correlations.
+8. ~~Time-of-day / timezone patterns~~ — **shipped as Session 14**
+   ([`sessions.md`](sessions.md#session-14--temporal-patterns-gap--shipped)).
+   New `qb_notebook/temporal.py` helpers + `marimo/temporal_patterns.py`.
+   Headlines: ~2× weekend-open first-touch penalty at the median;
+   Fri-evening opens 3× slower than Mon-morning at the median;
+   **Nov-Dec are 1.8-2.2× busier than the uniform month** (peak,
+   not dip) while April is the trough at 0.67×; **author × reviewer
+   TZ overlap does NOT predict first-touch latency** (medians flat
+   across all overlap buckets) — reframes any future "timezone gap"
+   framing in stories B/D.
 9. **PR dependency graph** — `analyzer_prdependency` /
    `analyzer_prdependencystate` parquets are exported but untouched
    here. Chains of stuck PRs, fan-in/fan-out, cascading unlocks.

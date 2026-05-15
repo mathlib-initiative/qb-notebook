@@ -484,3 +484,163 @@ joins `ready-to-merge` attribution back to each delegated PR's author.
   re-running `marimo/reviewer_load.py` will show those bots dropping
   out of the per-reviewer table (they previously appeared with
   triple-digit "triggers" counts on the bors-trigger chart).
+
+## Session 14 — temporal patterns (gap) — shipped
+
+**Question**: Mathlib4 is a global community on a UTC-stamped event
+stream, but no prior session looked at *when* things happen. Are
+there review-desert hours? Does opening a PR on a Friday afternoon
+cost a weekend? Does the project run with seasonal rhythm (holidays,
+summer slowdowns)? Do author/reviewer timezone alignment differences
+show up in first-touch latency? Backlog gap #8, extended to also
+cover seasonality.
+
+**Helpers** (new file `qb_notebook/temporal.py`, mirrors the
+`pr_shape.py` decorator pattern):
+
+- `with_temporal_columns(df, ts_col, *, prefix="")` — append UTC
+  `hour_utc` / `weekday` (0=Mon, 6=Sun) / `is_weekend` / `month` /
+  `year` / `year_month` derived from any datetime column. Pass a
+  prefix to decorate two timestamps on the same frame
+  (e.g. `"open_"` vs `"merge_"`).
+- `weekday_hour_histogram(df, *, ts_col="occurred_at")` — counts per
+  UTC (weekday × hour_utc) cell, **always emits all 168 cells**
+  zero-filled so heatmap rendering doesn't have to reindex. Caller
+  filters first (event types, bots, date window) — keeps the helper
+  schema-agnostic.
+- `actor_activity_window(events, *, window_hours=8, min_events=20)` —
+  per-actor inferred UTC active window. Builds a 24-bin
+  hour-of-day histogram per actor, then finds the contiguous
+  `window_hours`-length window of max activity (treating the clock
+  as circular so windows can wrap midnight). Returns
+  `peak_hour`, `window_start`, `window_end`, `active_hours: list[int]`,
+  `active_hours_share`. The "best contiguous window" framing maps
+  cleanly to "what timezone is this actor in".
+- `hour_set_overlap(hours_a, hours_b) -> int` — pairwise intersection
+  size between two `active_hours` lists; trivial helper but keeps the
+  per-PR overlap cell readable.
+- `WEEKDAY_LABELS` / `MONTH_LABELS` / `WEEKEND_DAYS` constants for
+  plot axes. Fifteen unit tests cover known-timestamp decoration,
+  null propagation, prefix isolation, zero-fill, bot exclusion,
+  event-type filtering, min-events filtering, and the
+  midnight-wrap circular window case.
+
+**Notebook** (new `marimo/temporal_patterns.py`):
+
+- **§1** — 2×2 hour × weekday heatmaps for **PR opens**, **first
+  touches** (broad: REVIEW_* + ISSUE_COMMENTED, Session 11),
+  **`maintainer-merge` sign-offs** (LABELED events, used directly —
+  `attribute_label_events` would be a few-second shift to the human
+  trigger but doesn't change the rhythm), and **bors merges**
+  (`merged_at_effective` on merged PRs). Plus a single-figure
+  hour-of-day rollup line chart (one normalised line per stream)
+  and per-hour / per-weekday summary tables.
+- **§2** — first-touch latency cut by the PR's open hour and
+  weekday. Heatmap of median first-touch hours, weekday-only
+  summary, weekend-vs-weekday open buckets, and an explicit
+  "Friday-evening vs Monday-morning" extreme-corner comparison.
+- **§3** — monthly seasonality with YoY overlay (one line per year)
+  and a trend-removed **seasonal index** (each month's average
+  share of its own year × 12; 1.0 = uniform). Computed across all
+  four streams. Years with fewer than 6 months of data dropped.
+- **§4** — per-actor inferred UTC active windows (`window_hours=8`,
+  `min_events=20`), per-actor peak-hour histogram with a rough
+  Europe-daytime band overlay, then per-PR
+  author × first-reviewer overlap. Median / p90 first-touch latency
+  by overlap bucket.
+
+**Empirical findings on the current artifact**:
+
+- **Hour-of-day** (counts marginalised over weekday, ratio to mean):
+  - **PR opens** are flat (0.64-1.41× mean range, no desert hours);
+    busiest at 14 UTC. Authors push throughout the day.
+  - **First touches** peak at 09 UTC (1.46×), three desert hours
+    02-04 UTC (<0.5× mean).
+  - **`maintainer-merge` labels** are the most concentrated stream:
+    peak 09 UTC at **1.84×** mean, **seven desert hours** below
+    0.5×. Reviewers sign off in tight European-morning windows.
+  - **Bors merges** peak at 15 UTC (1.51×), only one desert hour
+    (03 UTC at 0.47×).
+- **Weekday rhythm**:
+  - Opens are nearly uniform Mon-Fri (15-16 % each day) with **22.9 %
+    weekend share**. Authors work weekends too.
+  - **`maintainer-merge` peaks on Friday (17.1 %)**, the only stream
+    with a clear within-week peak — reviewers clear the queue
+    end-of-week.
+  - **Bors merges have the lowest weekend share (17.8 %)** — the
+    bors queue empties Mon-Fri even when authors push on weekends.
+- **First-touch latency by weekday-of-open** (broad, n=35 169):
+  median weekday-open **8.55 h** vs weekend-open **16.36 h** — a
+  clean **~2× weekend penalty at the median**. p90 is much closer
+  (330 h vs 378 h), so the weekend penalty is a "median delay,"
+  not a "PR gets stranded" effect.
+- **First-touch latency by hour-of-open**: morning opens
+  (06-11 UTC) are fastest at median **6.75 h**; evening opens
+  (18-23 UTC) are slowest at **12.63 h**. Cleaner is the corner
+  comparison: **Fri 17-23 UTC opens** sit at median **17.0 h** /
+  p90 **404 h**; **Mon 09-11 UTC opens** at **5.5 h** / p90 **271 h**.
+  That's a **~3× median ratio** between the worst and best open
+  times.
+- **Monthly seasonality** (trend-removed, 4-5 years contributing
+  per month):
+
+  | month | opens | touches | merges |
+  | ----- | ----- | ------- | ------ |
+  | Apr   | 0.66  | 0.68    | 0.67   |
+  | Aug   | 1.05  | 1.07    | 1.03   |
+  | Nov   | 1.76  | 1.98    | 1.90   |
+  | Dec   | **2.23** | **2.19** | **2.24** |
+
+  The headline is the **Nov-Dec peak, not a dip** — the opposite of
+  the intuitive holiday hypothesis. mathlib4 has a strong
+  end-of-year push (consistent across opens, touches, and merges).
+  **April is the trough** at ~0.67× across all streams. There is
+  **no clean summer dip** — Aug is roughly average. The
+  `maintainer-merge` seasonal index is unreliable (only 2 years of
+  data since the label was introduced Feb 2024); it's reported but
+  the Nov-Dec finding stands on the other three streams.
+- **Activity windows** — 365 actors have an inferred 8-hour window
+  (n_events ≥ 20). Top by volume: `kim-em` (peak 23 UTC, window
+  22-06 — atypical late-night), `eric-wieser` (22 UTC, 17-01),
+  `YaelDillies` (09 UTC, 07-15), `grunweg` (09 UTC, 08-16),
+  `jcommelin` (07 UTC, 07-15), `joelriou` (09 UTC, 09-17). Most
+  of the maintainer-team population peaks in 07-16 UTC (European
+  workday). Peak-hour distribution: **57 %** of actors peak in
+  07-16 UTC; the rest spread across evening / overnight UTC slots.
+- **Author × first-reviewer overlap × first-touch latency**
+  (n=33 827 PRs with windows on both sides): the overlap
+  distribution is **bimodal** — a large mass at 0 h overlap (~30 %
+  of PRs) and a second mass at 6-7 h overlap (~27 % combined).
+  Real timezone segregation exists.
+  But **first-touch latency does *not* show a clean monotonic
+  relationship with overlap** — medians range 7.8-12.5 h across all
+  overlap buckets with no clear trend (overlap=0 h median **10.3 h**,
+  overlap=8 h median **10.7 h**). The natural hypothesis "more
+  timezone overlap → faster touch" doesn't hold in this dataset.
+  Likely because mathlib4 review is a long-running async queue —
+  reviewers see a PR when they next sit down at their machine, not
+  when the author is also online. **Reframes any future timezone
+  story**: distinguishing reviewer pools by TZ is interesting for
+  workload distribution, but TZ alignment per-PR is not predictive
+  of speed.
+
+**Notes / open follow-ups**:
+
+- **Europe/Berlin clock overlay** on the hour-axis would make the
+  heatmaps more interpretable. UTC-only was the agreed scope for
+  this gap, so left to a follow-up.
+- **Per-actor nominal-TZ inference**: §4 uses the empirical hour
+  distribution directly; a clustering step could assign actors to
+  TZ bands and run reviewer-pool composition analysis. The §4
+  finding above suggests this is interesting for *who has the
+  bench* (reviewer-pool TZ mix) rather than for predicting latency.
+- **Holiday-calendar overlay**: the trend-removed seasonal index
+  would benefit from explicit Christmas / New Year / Easter
+  annotations, especially given the Nov-Dec peak is the headline
+  surprise. A small `holidays` package integration would do it.
+- The `maintainer-merge` seasonal index has only 2 years of data;
+  re-run after another full calendar year for a clean result.
+- Headline finding that reframes downstream stories: **TZ overlap
+  doesn't predict first-touch latency**. Story D (newcomer
+  experience) and any future "where does latency hide" story (B)
+  should not assume timezone gap is a primary contributor.
