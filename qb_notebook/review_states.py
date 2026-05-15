@@ -65,7 +65,12 @@ MATHLIB_LABEL_RETIRED_AT: Mapping[str, datetime] = {
 
 # Bot accounts that apply labels in response to human comments. Used by
 # :func:`attribute_label_events` to skip the bot when looking for the
-# human trigger.
+# human trigger. The bors-family accounts (``mathlib-bors``, ``bors``,
+# ``leanprover-radar``) post bot replies to ``bors r+`` / ``bors delegate``
+# commands and would otherwise be picked up as the most-recent comment
+# before the corresponding label was applied — important for ``delegated``
+# attribution (where the bors reply normally lands seconds before the
+# label) and also responsible for ~1 % of ``ready-to-merge`` mis-attributions.
 DEFAULT_BOT_ACTORS: frozenset[str] = frozenset(
     {
         "github-actions",
@@ -75,6 +80,9 @@ DEFAULT_BOT_ACTORS: frozenset[str] = frozenset(
         "mathlib4-merge-conflict-bot",
         "mathlib4-dependent-issues-bot",
         "dependabot",
+        "mathlib-bors",
+        "bors",
+        "leanprover-radar",
     }
 )
 

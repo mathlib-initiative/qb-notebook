@@ -663,6 +663,40 @@ def test_attribute_skips_bot_actors() -> None:
     assert row["inferred_actor"] == "alice"
 
 
+def test_attribute_skips_bors_family_bots() -> None:
+    """``mathlib-bors`` / ``bors`` post replies to ``bors r+`` / ``bors delegate``
+    commands seconds before the corresponding bot-applied label. Without
+    excluding them, ``delegated`` attribution lands on the bors bot rather than
+    the maintainer who issued the command. They must be in DEFAULT_BOT_ACTORS."""
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _ts(mins=0),
+                "type": "ISSUE_COMMENTED",
+                "label_name": None,
+                "actor_login": "kim-em",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _ts(mins=1),
+                "type": "ISSUE_COMMENTED",
+                "label_name": None,
+                "actor_login": "mathlib-bors",
+            },
+            {
+                "pull_request_id": 1,
+                "occurred_at": _ts(mins=2),
+                "type": "LABELED",
+                "label_name": "delegated",
+                "actor_login": "leanprover-community-mathlib4-bot",
+            },
+        ]
+    )
+    out = attribute_label_events(ev, "delegated", window_seconds=600)
+    assert out.row(0, named=True)["inferred_actor"] == "kim-em"
+
+
 def test_attribute_does_not_pick_future_events() -> None:
     """Events after the label shouldn't be considered triggers."""
     ev = _events(

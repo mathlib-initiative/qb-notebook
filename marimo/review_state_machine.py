@@ -72,20 +72,24 @@ def _():
     )
     from qb_notebook.review_states import (
         MATHLIB_LABEL_RETIRED_AT,
+        attribute_label_events,
         label_intervals,
         stage_timestamps,
     )
+    from qb_notebook.teams import load as load_teams
 
     return (
         DEFAULT_LINES_BREAKS,
         DEFAULT_PR_TYPES,
         MATHLIB_LABEL_RETIRED_AT,
         Path,
+        attribute_label_events,
         bucket_labels,
         datetime,
         expr_is_draft,
         label_intervals,
         load_pr_interval_data,
+        load_teams,
         merged_prs_frame,
         np,
         pl,
@@ -745,6 +749,374 @@ def _(DEFAULT_PR_TYPES, mo, pl, review_cycles_shape):
     )
     mo.md("### Ping-pong cycles by pr_type")
     ping_by_type
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 8. Delegated-merge path (Session 13)
+
+    `delegated` is the alternative sign-off label: a maintainer grants the
+    PR's author permission to push the bors merge themselves. Pre-2024
+    (`maintainer-merge` was introduced 2024-02-15) it was the *only*
+    workflow label for "ready to merge"; post-cutover it runs as a
+    parallel pathway alongside `maintainer-merge`. ~99 % of `delegated`
+    LABELED events are applied by bots in response to a `bors
+    delegate=author` command, so we use `attribute_label_events` to
+    credit the maintainer who actually issued the delegation.
+    """)
+    return
+
+
+@app.cell
+def _(Path, load_teams, mo):
+    """Optional teams overlay so the top-delegators table can be annotated."""
+    _candidate = Path(__file__).resolve().parents[2] / "leanprover-community.github.io"
+    if _candidate.exists():
+        teams = load_teams(_candidate, warn_on_unmatched=False)
+        teams_status = mo.md(f"_Loaded teams from `{_candidate}`._")
+    else:
+        teams = None
+        teams_status = mo.callout(
+            mo.md(
+                f"Sibling checkout `{_candidate}` not found — "
+                "team-membership annotations disabled."
+            ),
+            kind="warn",
+        )
+    teams_status
+    return (teams,)
+
+
+@app.cell
+def _(datetime, events, pl, timezone):
+    """First-LABELED timestamps for delegated and maintainer-merge, per PR."""
+    _deleg_first = (
+        events.filter(
+            (pl.col("type") == "LABELED") & (pl.col("label_name") == "delegated")
+        )
+        .group_by("pull_request_id")
+        .agg(pl.col("occurred_at").min().alias("first_deleg_at"))
+    )
+    _mm_first = (
+        events.filter(
+            (pl.col("type") == "LABELED") & (pl.col("label_name") == "maintainer-merge")
+        )
+        .group_by("pull_request_id")
+        .agg(pl.col("occurred_at").min().alias("first_mm_at"))
+    )
+    signoff_first = _deleg_first.join(
+        _mm_first, on="pull_request_id", how="full", coalesce=True
+    )
+    # 2024-02-15: `maintainer-merge` label introduced. Pre-cutover the only
+    # sign-off label available was `delegated`.
+    mm_cutover = datetime(2024, 2, 15, tzinfo=timezone.utc)
+    return mm_cutover, signoff_first
+
+
+@app.cell
+def _(mm_cutover, mo, pl, signoff_first):
+    """Cohort × era table: which sign-off path(s) did each PR take?"""
+    _classed = signoff_first.with_columns(
+        pl.min_horizontal("first_deleg_at", "first_mm_at").alias("first_signoff_at"),
+        pl.when(
+            pl.col("first_deleg_at").is_not_null() & pl.col("first_mm_at").is_not_null()
+        )
+        .then(pl.lit("both"))
+        .when(pl.col("first_deleg_at").is_not_null())
+        .then(pl.lit("delegated_only"))
+        .otherwise(pl.lit("mm_only"))
+        .alias("path"),
+    ).with_columns(
+        pl.when(pl.col("first_signoff_at") < mm_cutover)
+        .then(pl.lit("pre_mm"))
+        .otherwise(pl.lit("post_mm"))
+        .alias("era"),
+    )
+    cohort_table = (
+        _classed.group_by(["era", "path"])
+        .len()
+        .pivot(on="path", index="era", values="len", aggregate_function="first")
+        .fill_null(0)
+        .sort("era")
+    )
+    mo.md("### Cohort by era × path")
+    cohort_table
+    return
+
+
+@app.cell
+def _(events, mm_cutover, pl, plt):
+    """Monthly trend of `delegated` vs `maintainer-merge` LABELED events.
+
+    Marker line at the `maintainer-merge` cutover so the two-track
+    workflow is visible at a glance.
+    """
+    _monthly = (
+        events.filter(
+            (pl.col("type") == "LABELED")
+            & (pl.col("label_name").is_in(["delegated", "maintainer-merge"]))
+        )
+        .with_columns(pl.col("occurred_at").dt.truncate("1mo").alias("month"))
+        .group_by(["month", "label_name"])
+        .len()
+        .pivot(on="label_name", index="month", values="len", aggregate_function="first")
+        .fill_null(0)
+        .sort("month")
+    )
+    _fig, _ax = plt.subplots(figsize=(11, 4))
+    _ax.plot(
+        _monthly["month"].to_numpy(),
+        _monthly["delegated"].to_numpy(),
+        color="#6aa3d8",
+        label="delegated",
+    )
+    _ax.plot(
+        _monthly["month"].to_numpy(),
+        _monthly["maintainer-merge"].to_numpy(),
+        color="#c63",
+        label="maintainer-merge",
+    )
+    _ax.axvline(mm_cutover, color="#888", linestyle="--", linewidth=1)
+    _ax.text(
+        mm_cutover,
+        _ax.get_ylim()[1] * 0.95,
+        " mm-label introduced",
+        fontsize=8,
+        color="#666",
+        verticalalignment="top",
+    )
+    _ax.set_xlabel("Month")
+    _ax.set_ylabel("LABELED events")
+    _ax.set_title("Monthly LABELED volume — delegated vs maintainer-merge")
+    _ax.legend()
+    _ax.grid(True, alpha=0.3)
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _(attribute_label_events, events, mo, np, pl):
+    """Attribution coverage for the `delegated` label. The default bot list
+    now includes the bors-family accounts (mathlib-bors / bors /
+    leanprover-radar), so the inferred-actor column points at the
+    maintainer who issued `bors delegate=...`."""
+    deleg_attr = attribute_label_events(events, "delegated")
+    _n = deleg_attr.height
+    _na = deleg_attr.filter(pl.col("attributed")).height
+    _gaps = deleg_attr.filter(pl.col("attributed"))["gap_seconds"].to_numpy()
+    deleg_coverage = pl.DataFrame(
+        [
+            {
+                "events": _n,
+                "attributed": _na,
+                "pct_attributed": round(100 * _na / max(_n, 1), 1),
+                "median_gap_s": int(np.median(_gaps)) if _gaps.size else 0,
+                "p90_gap_s": int(np.percentile(_gaps, 90)) if _gaps.size else 0,
+            }
+        ]
+    )
+    mo.md("### Attribution coverage — `delegated`")
+    deleg_coverage
+    return (deleg_attr,)
+
+
+@app.cell
+def _(deleg_attr, pl, teams):
+    """Top delegators by attributed `delegated` LABELED events."""
+    _per = (
+        deleg_attr.filter(pl.col("attributed"))
+        .group_by("inferred_actor")
+        .agg(
+            pl.len().alias("triggers"),
+            pl.col("pull_request_id").n_unique().alias("distinct_prs"),
+        )
+        .sort("triggers", descending=True)
+        .rename({"inferred_actor": "actor"})
+    )
+    if teams is not None:
+        _maint = teams.maintainers
+        _rev = teams.reviewers
+        _per = _per.with_columns(
+            _per["actor"]
+            .map_elements(
+                lambda a: "maintainer"
+                if a.lower() in _maint
+                else ("reviewer" if a.lower() in _rev else "other"),
+                return_dtype=str,
+            )
+            .alias("team")
+        )
+    top_delegators = _per.head(15)
+    return (top_delegators,)
+
+
+@app.cell
+def _(mo, top_delegators):
+    mo.md("### Top 15 delegators")
+    top_delegators
+    return
+
+
+@app.cell
+def _(merged_prs, mm_cutover, pl, signoff_first):
+    """Per-PR sign-off → merge latency for each path. Merged-to-master only
+    (so bors's effective merge timestamp is in scope), and we restrict to
+    post-cutover sign-offs for the head-to-head comparison so both paths
+    have the same denominator era."""
+    _merged_slim = merged_prs.select("pull_request_id", "merged_at_effective")
+    _joined = signoff_first.join(_merged_slim, on="pull_request_id", how="inner")
+    deleg_lat = _joined.filter(
+        pl.col("first_deleg_at").is_not_null()
+        & pl.col("merged_at_effective").is_not_null()
+        & (pl.col("merged_at_effective") >= pl.col("first_deleg_at"))
+    ).with_columns(
+        (
+            (
+                pl.col("merged_at_effective") - pl.col("first_deleg_at")
+            ).dt.total_seconds()
+            / 86400.0
+        ).alias("days")
+    )
+    mm_lat = _joined.filter(
+        pl.col("first_mm_at").is_not_null()
+        & pl.col("merged_at_effective").is_not_null()
+        & (pl.col("merged_at_effective") >= pl.col("first_mm_at"))
+    ).with_columns(
+        (
+            (pl.col("merged_at_effective") - pl.col("first_mm_at")).dt.total_seconds()
+            / 86400.0
+        ).alias("days")
+    )
+    deleg_lat_post = deleg_lat.filter(pl.col("first_deleg_at") >= mm_cutover)
+    mm_lat_post = mm_lat.filter(pl.col("first_mm_at") >= mm_cutover)
+    return deleg_lat, deleg_lat_post, mm_lat_post
+
+
+@app.cell
+def _(deleg_lat_post, mm_lat_post, mo, np, pl):
+    """Headline latency comparison (post-cutover, days)."""
+
+    def _pcts(arr: np.ndarray) -> dict:
+        if arr.size == 0:
+            return {"n": 0, "median_d": None, "p75_d": None, "p90_d": None}
+        return {
+            "n": int(arr.size),
+            "median_d": round(float(np.median(arr)), 3),
+            "p75_d": round(float(np.percentile(arr, 75)), 3),
+            "p90_d": round(float(np.percentile(arr, 90)), 3),
+        }
+
+    _deleg_vals = deleg_lat_post["days"].to_numpy()
+    _mm_vals = mm_lat_post["days"].to_numpy()
+    signoff_latency = pl.DataFrame(
+        [
+            {"path": "delegated", **_pcts(_deleg_vals)},
+            {"path": "maintainer-merge", **_pcts(_mm_vals)},
+        ]
+    )
+    mo.md("### Sign-off → merge latency (post-cutover, days)")
+    signoff_latency
+    return
+
+
+@app.cell
+def _(deleg_lat_post, mm_lat_post, plt):
+    """Side-by-side distribution of sign-off → merge latency (≤7d zoom)."""
+    _fig, _ax = plt.subplots(figsize=(10, 4))
+    _bins = [i * 0.25 for i in range(29)]  # 0..7 days, 0.25d bins
+    _ax.hist(
+        deleg_lat_post.filter(deleg_lat_post["days"] <= 7)["days"].to_numpy(),
+        bins=_bins,
+        color="#6aa3d8",
+        alpha=0.6,
+        label="delegated",
+    )
+    _ax.hist(
+        mm_lat_post.filter(mm_lat_post["days"] <= 7)["days"].to_numpy(),
+        bins=_bins,
+        color="#c63",
+        alpha=0.6,
+        label="maintainer-merge",
+    )
+    _ax.set_xlabel("Days from sign-off → merge")
+    _ax.set_ylabel("PRs")
+    _ax.set_title("Sign-off → merge latency (post-cutover, ≤7d zoom)")
+    _ax.legend()
+    _ax.grid(True, alpha=0.3)
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _(Path, pl, prs):
+    """Author-login table for the self-merge attribution cell. `core_user` isn't
+    loaded by `load_pr_interval_data`, so we read it once here and join to
+    `prs.author_id` to map each PR to its author's GitHub login."""
+    _data_dir = Path(__file__).resolve().parents[1] / "data"
+    _users = pl.read_parquet(_data_dir / "core_user.parquet").select(
+        pl.col("id").alias("author_id"),
+        pl.col("github_login").alias("author_login"),
+    )
+    pr_author = (
+        prs.select("id", "author_id")
+        .join(_users, on="author_id", how="left")
+        .rename({"id": "pull_request_id"})
+        .select("pull_request_id", "author_login")
+    )
+    return (pr_author,)
+
+
+@app.cell
+def _(attribute_label_events, deleg_lat, events, mo, pl, pr_author):
+    """Self-merge rate: of delegated PRs that subsequently get a
+    `ready-to-merge` attribution, how often is the bors-trigger the PR
+    *author* themselves? That's the literal purpose of delegation."""
+    _r2m = (
+        attribute_label_events(events, "ready-to-merge")
+        .filter(pl.col("attributed"))
+        .select(
+            "pull_request_id",
+            pl.col("label_at").alias("r2m_at"),
+            pl.col("inferred_actor").alias("r2m_actor"),
+        )
+    )
+    _deleg_au = deleg_lat.select("pull_request_id", "first_deleg_at").join(
+        pr_author, on="pull_request_id", how="left"
+    )
+    _pairs = (
+        _deleg_au.join(_r2m, on="pull_request_id", how="left")
+        .filter(pl.col("r2m_at") >= pl.col("first_deleg_at"))
+        .sort(["pull_request_id", "r2m_at"])
+        .unique(subset=["pull_request_id"], keep="first")
+        .with_columns(
+            (
+                pl.col("r2m_actor").str.to_lowercase()
+                == pl.col("author_login").str.to_lowercase()
+            ).alias("author_self_merge")
+        )
+    )
+    _n = _pairs.height
+    _self = int(_pairs["author_self_merge"].sum())
+    self_merge_table = pl.DataFrame(
+        [
+            {
+                "delegated_PRs_with_subsequent_r2m": _n,
+                "author_self_merge": _self,
+                "share": round(_self / max(_n, 1), 3),
+                "other_actor_merge": _n - _self,
+            }
+        ]
+    )
+    mo.md(
+        "### Author self-merge rate after delegation\n"
+        "For each delegated PR that later received a `ready-to-merge` "
+        "attribution, was the bors-trigger actor the PR author?"
+    )
+    self_merge_table
     return
 
 

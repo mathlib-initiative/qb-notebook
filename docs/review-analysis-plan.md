@@ -206,7 +206,8 @@ code.
 | 10      | Plot-site polish                 | promote best plots from each notebook                           | planned  |
 | 11      | Gap: first-touch latency         | `first_review_touch` helper + section in `reviewer_load.py`     | shipped  |
 | 12      | Gap: inline-comment depth        | `inline_comment_stats` helper + §9 in `bottleneck_localization.py` | shipped |
-| 13+     | Gaps & stories                   | see [backlog](review-analysis/backlog.md)                       | planned  |
+| 13      | Gap: delegated-merge path        | §8 in `review_state_machine.py` + `DEFAULT_BOT_ACTORS` bot-list fix | shipped |
+| 14+     | Gaps & stories                   | see [backlog](review-analysis/backlog.md)                       | planned  |
 
 Order is flexible — Themes 1 and 2 were the highest-value starting points;
 the post-Theme-5 sessions (6+) are cleanups and cross-cuts unlocked by the

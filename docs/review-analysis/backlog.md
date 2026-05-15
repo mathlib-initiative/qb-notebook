@@ -30,10 +30,12 @@ In rough priority order (highest leverage / smallest first):
    Helper `inline_comment_stats` + Section 9 cells in
    `bottleneck_localization.py`. Inline-comment volume × approved-to-merge
    latency has a clean ~5× monotonic gradient (0 → 11+ comments-by-others).
-3. **Approval-source disagreement** — `prs.approvals` (GitHub-native)
-   has ~52 % coverage on maintainer-merged PRs. Characterize the
-   non-overlap: native approvals without `maintainer-merge` label, and
-   vice versa. Sanity-check on the attribution heuristic.
+3. ~~Approval-source disagreement~~ — **dropped**. `prs.approvals`
+   (GitHub-native) is used inconsistently in mathlib4 (the maintainer
+   workflow leans on `maintainer merge` comments rather than the GitHub
+   Approve button), so the ~48 % non-overlap on maintainer-merged PRs
+   is dominated by workflow preference rather than heuristic error.
+   It can't function as a sanity check on `attribute_label_events`.
 4. **Reviewer cohort survival / churn** — of reviewers active in year
    X, what fraction still active in year Y? Theme 2 has trend totals
    but no retention curves.
@@ -43,9 +45,15 @@ In rough priority order (highest leverage / smallest first):
 6. **Force-push impact** — `HEAD_FORCE_PUSHED` is in the event stream
    but unused. Does a force-push reset reviewer attention (next-touch
    latency)? Per-PR penalty.
-7. **Delegated-merge path** — the `delegated` label is in the workflow
-   list but no theme analyzes it. Volume, who delegates, latency vs.
-   the standard `maintainer-merge` route.
+7. ~~Delegated-merge path~~ — **shipped as Session 13**
+   ([`sessions.md`](sessions.md#session-13--delegated-merge-path-gap--shipped)).
+   New Section 8 in `marimo/review_state_machine.py`. Headline:
+   delegated path is ~40 % faster at the median and ~45 % faster at
+   p90 than the maintainer-merge → bors route; 76 % of delegated PRs
+   are author-self-merged. Bonus: fixes a `DEFAULT_BOT_ACTORS` bug
+   where `mathlib-bors` / `bors` / `leanprover-radar` weren't excluded,
+   which had been mis-attributing ~98 % of `delegated` and ~1 % of
+   `ready-to-merge` events.
 8. **Time-of-day / timezone patterns** — global community, no
    time-of-day analysis yet. Review-desert windows, weekend latency,
    author/reviewer activity-window correlations.

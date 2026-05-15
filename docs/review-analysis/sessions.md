@@ -395,3 +395,92 @@ comment):
 - Inline comments coverage backfills to 2021-06-03, so there's no
   censoring window — the gradient above is robust over the full
   history.
+
+## Session 13 — delegated-merge path (gap) — shipped
+
+**Question**: The `delegated` label grants the PR's author permission to
+trigger the bors merge themselves. It pre-dates `maintainer-merge` (the
+label was introduced 2022-07; `maintainer-merge` 2024-02-15) and runs as
+a parallel sign-off pathway. None of Themes 1–5 looked at it directly.
+Volume, who delegates, and latency vs the standard
+`maintainer-merge → bors` route?
+
+**Helper fix**: `DEFAULT_BOT_ACTORS` in
+`qb_notebook/review_states.py` was missing the bors-family bot accounts
+(`mathlib-bors`, `bors`, `leanprover-radar`). Those bots post replies to
+`bors r+` / `bors delegate=...` commands seconds before the corresponding
+`ready-to-merge` / `delegated` label is applied, so
+`attribute_label_events` was crediting them as the human "trigger" for
+~98 % of `delegated` events (the top "delegators" were `mathlib-bors` at
+6 670 and `bors` at 1 340) and for ~1 % of `ready-to-merge` events.
+Added them to the default set with a comment explaining the rationale; a
+new unit test (`test_attribute_skips_bors_family_bots`) pins the
+behaviour. Coverage on the other labels is unaffected:
+`maintainer-merge` attribution moved by 2 events out of 8 392.
+
+**Notebook**: New `## 8. Delegated-merge path` in
+`marimo/review_state_machine.py` — cohort × era table, monthly
+LABELED-volume trend (with mm-cutover marker), attribution coverage,
+top-15 delegators (team-annotated when the sibling
+`leanprover-community.github.io` checkout is present), sign-off → merge
+latency table + ≤7d histogram, and an author self-merge rate cell that
+joins `ready-to-merge` attribution back to each delegated PR's author.
+
+**Empirical findings on the current artifact**:
+
+- **Volume and cohorts**: 8 131 PRs ever delegated vs 8 255 with
+  `maintainer-merge`. The two paths run in **parallel post-cutover**,
+  not sequentially: of the 6 184 post-cutover delegated PRs,
+  **4 441 (72 %) are `delegated_only`** (no `maintainer-merge` label
+  ever applied). Only 1 743 (28 %) have both labels, and when both are
+  present `maintainer-merge` lands first (median 3.7 h before
+  `delegated`). Pre-cutover all 1 947 delegated PRs are by definition
+  `delegated_only`. So delegated isn't a niche legacy mechanism —
+  it's the workflow path for ~40 % of all post-cutover sign-offs.
+- **Attribution coverage**: 98.8 % with the fixed default bot set
+  (vs 99.3 % when bors-bots were spuriously credited). Median gap
+  human-comment → label apply is **12 s**, p90 **25 s** — tight, same
+  shape as `maintainer-merge` attribution.
+- **Top delegators** (with bors-bots excluded): `jcommelin` (1 200),
+  `riccardobrasca` (1 023), `eric-wieser` (867), `kim-em` (545),
+  `j-loreaux` (513), `ocfnash` (511), `sgouezel` (487), `Vierkantor`
+  (331). All maintainer-team members; the distribution is more
+  concentrated than `maintainer-merge` triggers (one or two people
+  delegate a lot, then a steep drop).
+- **Sign-off → merge latency** (post-cutover, days):
+
+  | path             | n     | median | p75   | p90   |
+  | ---------------- | ----- | ------ | ----- | ----- |
+  | delegated        | 6 026 | 0.210  | 0.649 | 2.387 |
+  | maintainer-merge | 8 053 | 0.349  | 1.253 | 4.279 |
+
+  **Delegated path is ~40 % faster at the median and ~45 % faster at
+  p90** than the maintainer-merge → bors route. Likely two effects: the
+  author is sitting in front of the PR and triggers bors immediately
+  once delegated, whereas mm-sign-off PRs wait for *another* maintainer
+  to come along and `bors r+`. Also, "both labels" PRs sit ~3× longer
+  than `mm_only` (median mm→merge 0.74 d vs 0.26 d) — they're the harder
+  PRs that needed a second pass.
+- **Author self-merge rate**: of the 2 894 delegated PRs that
+  subsequently received a `ready-to-merge` attribution, **76.4 %** had
+  the **PR author** themselves as the bors trigger. The other 23.6 % are
+  cases where someone else (typically another maintainer) ended up
+  pushing the button — usually because the author didn't come back to
+  the PR for a while. So delegation actually delivers on its intent for
+  three out of four PRs.
+
+**Notes / open follow-ups**:
+
+- The post-cutover `mm_only` cohort overlaps significantly with the
+  `delegated_only` cohort by PR shape — both are dominated by the
+  smaller `chore:` / `doc:` / `fix:` types. Per-shape cuts (latency by
+  `lines_bucket` × path, `pr_type` × path) are a natural next step but
+  out of scope for this gap; Story B (where does latency hide) is the
+  natural home.
+- Session 13 also fixes the bors-bot attribution bug in
+  `DEFAULT_BOT_ACTORS`. The few percent of legacy `ready-to-merge`
+  attributions that previously credited `mathlib-bors` / `bors` /
+  `leanprover-radar` now correctly fall through to the human comment;
+  re-running `marimo/reviewer_load.py` will show those bots dropping
+  out of the per-reviewer table (they previously appeared with
+  triple-digit "triggers" counts on the bors-trigger chart).
