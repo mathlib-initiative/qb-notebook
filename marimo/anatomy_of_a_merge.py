@@ -5,14 +5,6 @@ import marimo
 __generated_with = "0.23.6"
 app = marimo.App(width="medium")
 
-# End-to-end lifecycle waterfall for mathlib4 PRs: open → first touch →
-# maintainer-merge → ready-to-merge / delegated → merged. Pairs the
-# milestone funnel (Sankey) with per-stage duration distributions and the
-# usual pr_shape / topic-area / author-cohort cuts. Story B (latency
-# decomposition) owns the deeper court-vs-author split of the
-# first-touch → MM stage; here we keep that stage as a single block and
-# expose queue-cycle count as the one queue-aware metric.
-
 
 @app.cell
 def _():
@@ -187,7 +179,14 @@ def _(
 
 
 @app.cell
-def _(MATHLIB_LABEL_RETIRED_AT, asof, events, label_intervals, pl, prs_enriched):
+def _(
+    MATHLIB_LABEL_RETIRED_AT,
+    asof,
+    events,
+    label_intervals,
+    pl,
+    prs_enriched,
+):
     """`t-*` label intervals over the full timeline (open intervals run to
     `asof`). We do *not* clamp at PR close: GitHub doesn't auto-remove
     labels on close, and the half-open `[start, end_effective)` lookup in
@@ -231,10 +230,22 @@ def _(mo):
     )
 
     show_cycle_branches = mo.ui.checkbox(
-        value=False, label="Sankey: split touched→MM by queue-cycle count"
+        value=False,
+        label="Sankey: insert sequential queue-cycle nodes after `1 queue cycle`",
     )
-    mo.hstack([cohort, show_cycle_branches])
-    return cohort, show_cycle_branches
+    # Shared height for §1 and §1b Sankeys. Plotly Sankey has no
+    # native scroll-zoom (no zoomable axes), so a slider is the
+    # interactive way to fit the figure inside the cell output.
+    sankey_height = mo.ui.slider(
+        start=380,
+        stop=1000,
+        step=20,
+        value=520,
+        label="Sankey height (px)",
+        show_value=True,
+    )
+    mo.hstack([cohort, show_cycle_branches, sankey_height])
+    return cohort, sankey_height, show_cycle_branches
 
 
 @app.cell
@@ -410,7 +421,7 @@ def _(labels_active_at, pl, pr_pipeline, t_intervals):
     pr_topic_one = pr_topic_long.sort(["pull_request_id", "topic_area"]).unique(
         subset=["pull_request_id"], keep="first"
     )
-    return pr_topic_long, pr_topic_one
+    return (pr_topic_one,)
 
 
 @app.cell
@@ -489,29 +500,50 @@ def _(mo):
     the delegated node even if it also got `ready-to-merge` (typical:
     delegated → author runs `bors r+` themselves → RTM applied → merge).
 
-    Toggle the checkbox above to split the `touched → MM` segment by
-    queue-cycle count (1 / 2 / 3+) — useful for seeing how often PRs
-    bounce back to the author before sign-off.
+    Toggle the checkbox above to insert "needed-another-round" nodes
+    after the `1 queue cycle` node. `1 queue cycle` itself is the
+    PR's first review cycle (entered when a non-author / non-bot first
+    reviews or comments — the underlying milestone is `first_touch_at`),
+    so the extra cycle nodes are only emitted when a PR's
+    `n_queue_cycles_before_mm` was 2 or 3+. The link
+    `1 queue cycle → 2 queue cycles` reads as "needed another review
+    round"; the link `1 queue cycle → MM` reads as "got signed off
+    after one round".
     """)
     return
 
 
 @app.cell
-def _(go, pl, pr_pipeline, show_cycle_branches):
+def _(go, pr_pipeline, sankey_height, show_cycle_branches):
     """Build the Sankey from per-PR path classifications.
 
     Each PR contributes one path = sequence of nodes; the function below
     accumulates per-edge counts and hands them to plotly. The cycle-branch
-    toggle changes the node set between touched and MM.
+    toggle inserts "2 queue cycles" / "3+ queue cycles" nodes after
+    `1 queue cycle` for PRs that needed more than one review round —
+    `1 queue cycle` itself (the first-touch milestone) stands in for
+    the first cycle, so `1 queue cycle → MM` means "got signed off
+    after one round" and `1 queue cycle → 2 queue cycles` means
+    "needed another round".
     """
     show_cycles = bool(show_cycle_branches.value)
 
     def _path_for(row: dict) -> list[str]:
         steps = ["opened"]
         if row["first_touch_at"] is not None:
-            steps.append("touched")
+            steps.append("1 queue cycle")
             if show_cycles:
-                steps.append(f"{row['cycle_bucket']} queue cycle(s)")
+                # `1 queue cycle` is the implicit first-cycle node, so
+                # the extra cycle nodes only appear when the PR needed
+                # more than one round. Bucket "2" emits one extra node,
+                # bucket "3+" emits both. Side exits from each cycle
+                # node to MM / bors r+ / delegated / terminal are
+                # picked up by the steps appended below.
+                _bucket = row["cycle_bucket"]
+                if _bucket in ("2", "3+"):
+                    steps.append("2 queue cycles")
+                if _bucket == "3+":
+                    steps.append("3+ queue cycles")
         if row["first_maintainer_merge_at"] is not None:
             steps.append("maintainer-merge")
         # `delegated` and `bors r+` nodes are visited based on the labels
@@ -545,13 +577,15 @@ def _(go, pl, pr_pipeline, show_cycle_branches):
         for _a, _b in zip(_steps, _steps[1:]):
             _edge_counts[(_a, _b)] = _edge_counts.get((_a, _b), 0) + 1
 
-    # Stable node ordering — controls the column layout.
+    # Stable node ordering — controls the column layout. `1 queue cycle`
+    # stands in for the first cycle (underlying milestone:
+    # `first_touch_at`); the extra cycle nodes only fire for PRs that
+    # needed a second / third round.
     _node_order = [
         "opened",
-        "touched",
-        "1 queue cycle(s)",
-        "2 queue cycle(s)",
-        "3+ queue cycle(s)",
+        "1 queue cycle",
+        "2 queue cycles",
+        "3+ queue cycles",
         "maintainer-merge",
         "bors r+",
         "delegated",
@@ -571,10 +605,9 @@ def _(go, pl, pr_pipeline, show_cycle_branches):
 
     _node_colors = {
         "opened": "#888",
-        "touched": "#4a90d9",
-        "1 queue cycle(s)": "#9bc4ec",
-        "2 queue cycle(s)": "#6ea7d8",
-        "3+ queue cycle(s)": "#3f7fbe",
+        "1 queue cycle": "#4a90d9",
+        "2 queue cycles": "#6ea7d8",
+        "3+ queue cycles": "#3f7fbe",
         "maintainer-merge": "#c63",
         "bors r+": "#73a946",
         "delegated": "#9d72c7",
@@ -583,14 +616,68 @@ def _(go, pl, pr_pipeline, show_cycle_branches):
         "still open": "#bbb",
     }
 
+    # Explicit node positions (x = column, y = vertical) to control
+    # ribbon paths. Plotly's auto-layout uses a barycenter heuristic
+    # that doesn't fully avoid crossings on this topology (cycle nodes
+    # fanning to MM + signoff + terminal at varying distances). Pinning
+    # cycle nodes near the top keeps "continue to next cycle" ribbons
+    # nearly horizontal so the long "exit to MM/bors/delegated" ribbons
+    # can drop below them without crossing.
+    _NODE_X = {
+        "opened": 0.001,
+        "1 queue cycle": 0.14,
+        "2 queue cycles": 0.30,
+        "3+ queue cycles": 0.46,
+        "maintainer-merge": 0.62,
+        "bors r+": 0.78,
+        "delegated": 0.78,
+        "merged": 0.999,
+        "closed unmerged": 0.999,
+        "still open": 0.999,
+    }
+    _NODE_Y = {
+        "opened": 0.5,
+        "1 queue cycle": 0.05,
+        "2 queue cycles": 0.05,
+        "3+ queue cycles": 0.05,
+        "maintainer-merge": 0.22,
+        "bors r+": 0.50,
+        "delegated": 0.72,
+        "merged": 0.30,
+        "closed unmerged": 0.72,
+        "still open": 0.95,
+    }
+
+    # Sort links so within each source node, ribbons stack top-to-bottom
+    # by target y. This pairs with the pinned positions above: Plotly
+    # draws ribbons in array order, so sorting here is what actually
+    # prevents the cycle→MM and cycle→cycle ribbons from twisting.
+    _link_order = sorted(
+        range(len(_src)),
+        key=lambda i: (
+            _NODE_X[_nodes[_src[i]]],
+            _NODE_Y[_nodes[_src[i]]],
+            _NODE_Y[_nodes[_tgt[i]]],
+        ),
+    )
+    _src = [_src[i] for i in _link_order]
+    _tgt = [_tgt[i] for i in _link_order]
+    _val = [_val[i] for i in _link_order]
+
     sankey_fig = go.Figure(
         data=[
             go.Sankey(
-                arrangement="snap",
+                # `freeform` lets dragged nodes stay where you put them
+                # instead of snapping back to the column grid; combined
+                # with the taller figure + extra padding it gives enough
+                # room to hand-tune label overlaps in the cycle column.
+                arrangement="freeform",
                 node=dict(
                     label=_nodes,
                     color=[_node_colors.get(n, "#999") for n in _nodes],
-                    pad=18,
+                    x=[_NODE_X[n] for n in _nodes],
+                    y=[_NODE_Y[n] for n in _nodes],
+                    pad=28,
                     thickness=18,
                 ),
                 link=dict(source=_src, target=_tgt, value=_val),
@@ -600,9 +687,253 @@ def _(go, pl, pr_pipeline, show_cycle_branches):
     sankey_fig.update_layout(
         title="Lifecycle flow — counts of PRs traversing each segment",
         font=dict(size=12),
-        height=520,
+        height=int(sankey_height.value),
+        margin=dict(l=10, r=10, t=60, b=20),
     )
     sankey_fig
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 1b. Slide-friendly focus-mode Sankey
+
+    Same lifecycle as §1, but the extra-cycle nodes are always shown
+    and the figure ships with a built-in per-node focus dropdown
+    (plotly `updatemenus`). Pick a node from the dropdown inside the
+    figure: every ribbon entering or leaving that node lights up, the
+    rest dim, and the title shrinks to `node — N in · M out`. "All
+    segments" resets to the full view. Designed for slide builds —
+    export with `sankey_focus_fig.write_html("path.html", include_plotlyjs="cdn")`
+    and either link the HTML from the deck or screenshot each dropdown
+    state for a static build sequence.
+    """)
+    return
+
+
+@app.cell
+def _(go, pr_pipeline, sankey_height):
+    """Focus-mode Sankey: reuses §1's edge accumulation but always
+    includes cycle nodes and embeds a plotly-native focus dropdown so a
+    single exported HTML covers every slide build."""
+
+    def _path_for(row: dict) -> list[str]:
+        steps = ["opened"]
+        if row["first_touch_at"] is not None:
+            steps.append("1 queue cycle")
+            _bucket = row["cycle_bucket"]
+            if _bucket in ("2", "3+"):
+                steps.append("2 queue cycles")
+            if _bucket == "3+":
+                steps.append("3+ queue cycles")
+        if row["first_maintainer_merge_at"] is not None:
+            steps.append("maintainer-merge")
+        if row["had_delegated"]:
+            steps.append("delegated")
+        elif row["first_ready_to_merge_at"] is not None:
+            steps.append("bors r+")
+        if row["terminal"] == "merged":
+            steps.append("merged")
+        elif row["terminal"] == "closed_unmerged":
+            steps.append("closed unmerged")
+        else:
+            steps.append("still open")
+        return steps
+
+    _rows = pr_pipeline.select(
+        "first_touch_at",
+        "first_maintainer_merge_at",
+        "first_ready_to_merge_at",
+        "had_delegated",
+        "terminal",
+        "cycle_bucket",
+    ).to_dicts()
+
+    _edge_counts: dict[tuple[str, str], int] = {}
+    for _r in _rows:
+        _steps = _path_for(_r)
+        for _a, _b in zip(_steps, _steps[1:]):
+            _edge_counts[(_a, _b)] = _edge_counts.get((_a, _b), 0) + 1
+
+    _node_order = [
+        "opened",
+        "1 queue cycle",
+        "2 queue cycles",
+        "3+ queue cycles",
+        "maintainer-merge",
+        "bors r+",
+        "delegated",
+        "merged",
+        "closed unmerged",
+        "still open",
+    ]
+    _present = {n for edge in _edge_counts for n in edge}
+    _nodes = [n for n in _node_order if n in _present]
+    _node_idx = {n: i for i, n in enumerate(_nodes)}
+
+    _node_colors_map = {
+        "opened": "#888",
+        "1 queue cycle": "#4a90d9",
+        "2 queue cycles": "#6ea7d8",
+        "3+ queue cycles": "#3f7fbe",
+        "maintainer-merge": "#c63",
+        "bors r+": "#73a946",
+        "delegated": "#9d72c7",
+        "merged": "#2c7a2c",
+        "closed unmerged": "#a33",
+        "still open": "#bbb",
+    }
+
+    # Explicit node positions (x = column, y = vertical) to control
+    # ribbon paths — same layout as §1; see that cell for the rationale.
+    _NODE_X = {
+        "opened": 0.001,
+        "1 queue cycle": 0.14,
+        "2 queue cycles": 0.30,
+        "3+ queue cycles": 0.46,
+        "maintainer-merge": 0.62,
+        "bors r+": 0.78,
+        "delegated": 0.78,
+        "merged": 0.999,
+        "closed unmerged": 0.999,
+        "still open": 0.999,
+    }
+    _NODE_Y = {
+        "opened": 0.5,
+        "1 queue cycle": 0.05,
+        "2 queue cycles": 0.05,
+        "3+ queue cycles": 0.05,
+        "maintainer-merge": 0.22,
+        "bors r+": 0.50,
+        "delegated": 0.72,
+        "merged": 0.30,
+        "closed unmerged": 0.72,
+        "still open": 0.95,
+    }
+
+    # Per-link arrays, sorted so ribbons stack top-to-bottom by target y
+    # within each source node. `_edges_list` is permuted in lockstep so
+    # the focus-mode `link.color` lookup stays positionally aligned with
+    # `_src` / `_tgt` / `_val`.
+    _src_unsorted, _tgt_unsorted, _val_unsorted, _edges_unsorted = [], [], [], []
+    for (_a, _b), _v in _edge_counts.items():
+        _src_unsorted.append(_node_idx[_a])
+        _tgt_unsorted.append(_node_idx[_b])
+        _val_unsorted.append(_v)
+        _edges_unsorted.append((_a, _b))
+
+    _link_order = sorted(
+        range(len(_src_unsorted)),
+        key=lambda i: (
+            _NODE_X[_nodes[_src_unsorted[i]]],
+            _NODE_Y[_nodes[_src_unsorted[i]]],
+            _NODE_Y[_nodes[_tgt_unsorted[i]]],
+        ),
+    )
+    _src = [_src_unsorted[i] for i in _link_order]
+    _tgt = [_tgt_unsorted[i] for i in _link_order]
+    _val = [_val_unsorted[i] for i in _link_order]
+    _edges_list = [_edges_unsorted[i] for i in _link_order]
+
+    def _sum_into(node: str) -> int:
+        return sum(v for (a, b), v in _edge_counts.items() if b == node)
+
+    def _sum_from(node: str) -> int:
+        return sum(v for (a, b), v in _edge_counts.items() if a == node)
+
+    # One focus per node: clicking the dropdown entry highlights every
+    # ribbon entering or leaving that node and rewrites the title to a
+    # short `node — N in · M out` summary. "All segments" resets the
+    # view. Source nodes (no incoming) and sink nodes (no outgoing) get
+    # the corresponding half omitted so the title stays compact.
+    def _node_title(node: str) -> str:
+        n_in = _sum_into(node)
+        n_out = _sum_from(node)
+        if n_in == 0:
+            return f"<b>{node}</b> — {n_out:,} out"
+        if n_out == 0:
+            return f"<b>{node}</b> — {n_in:,} in"
+        return f"<b>{node}</b> — {n_in:,} in · {n_out:,} out"
+
+    def _node_edges(node: str) -> set:
+        return {(a, b) for (a, b) in _edges_list if a == node or b == node}
+
+    _n_opened = _sum_from("opened")
+    _focuses = [
+        (
+            "All segments",
+            set(_edges_list),
+            f"<b>Full lifecycle</b> — {_n_opened:,} PRs",
+        ),
+    ]
+    for _n in _nodes:
+        _focuses.append((_n, _node_edges(_n), _node_title(_n)))
+
+    _DIM = "rgba(200,200,200,0.18)"
+    _BRIGHT = "rgba(74,144,217,0.5)"
+
+    def _colors_for(focus_edges: set) -> list[str]:
+        return [_BRIGHT if (a, b) in focus_edges else _DIM for (a, b) in _edges_list]
+
+    sankey_focus_fig = go.Figure(
+        data=[
+            go.Sankey(
+                arrangement="freeform",
+                node=dict(
+                    label=_nodes,
+                    color=[_node_colors_map.get(n, "#999") for n in _nodes],
+                    x=[_NODE_X[n] for n in _nodes],
+                    y=[_NODE_Y[n] for n in _nodes],
+                    pad=28,
+                    thickness=18,
+                ),
+                link=dict(
+                    source=_src,
+                    target=_tgt,
+                    value=_val,
+                    color=_colors_for(_focuses[0][1]),
+                ),
+            )
+        ]
+    )
+
+    _buttons = [
+        dict(
+            label=name,
+            method="update",
+            args=[
+                # restyle: per-link colors. Plotly expects the array
+                # wrapped in a list (one entry per trace being updated).
+                {"link.color": [_colors_for(edges)]},
+                # relayout: headline counts for this focus.
+                {"title.text": title},
+            ],
+        )
+        for (name, edges, title) in _focuses
+    ]
+
+    sankey_focus_fig.update_layout(
+        title=_focuses[0][2],
+        updatemenus=[
+            dict(
+                buttons=_buttons,
+                direction="down",
+                showactive=True,
+                x=0.01,
+                y=1.18,
+                xanchor="left",
+                yanchor="top",
+                pad=dict(r=10, t=10),
+                bgcolor="white",
+                bordercolor="#bbb",
+            )
+        ],
+        height=int(sankey_height.value),
+        margin=dict(l=10, r=10, t=100, b=20),
+        font=dict(size=12),
+    )
+    sankey_focus_fig
     return
 
 
@@ -1005,7 +1336,12 @@ def _(mo):
 
 @app.cell
 def _(
-    DEFAULT_BOT_ACTORS, events, inline_comment_stats, inline_comments, pl, prs_cohort
+    DEFAULT_BOT_ACTORS,
+    events,
+    inline_comment_stats,
+    inline_comments,
+    pl,
+    prs_cohort,
 ):
     """Per-PR review-activity counts (bots + author excluded)."""
     _author_keys = prs_cohort.select(
