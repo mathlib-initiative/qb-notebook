@@ -1122,6 +1122,76 @@ def _(go, pr_pipeline, sankey_height):
 
 
 @app.cell
+def _(mo):
+    """Authoring helper: drag the Sankey nodes around, click this button,
+    and the new `_NODE_X` / `_NODE_Y` dicts are printed to the browser
+    console (and copied to the clipboard) ready to paste over the
+    pinned positions in §1 and §1b.
+
+    Renders via `mo.iframe` because `mo.Html` strips `<script>` tags
+    (per the `mo.iframe` docstring). From inside the iframe we walk
+    `window.parent.document` to reach the `<marimo-plotly>` shadow
+    DOMs in the host page, and we call `parent.navigator.clipboard`
+    so the write inherits the host page's clipboard permissions
+    (an iframe without `allow="clipboard-write"` would otherwise be
+    blocked)."""
+    _html = """
+    <button id="qb-dump-sankey-btn"
+        style="padding:6px 12px;cursor:pointer;
+        border:1px solid #bbb;border-radius:4px;background:#fafafa;">
+      Dump Sankey node positions (console + clipboard)
+    </button>
+    <script>
+    (() => {
+      const btn = document.getElementById('qb-dump-sankey-btn');
+      console.log('[qb] Sankey-dump button wired');
+      btn.addEventListener('click', () => {
+        const doc = window.parent.document;
+        const fmt = (n) => Number(n).toFixed(3);
+        const gds = [];
+        const walk = (root) => {
+          gds.push(...root.querySelectorAll('.js-plotly-plot'));
+          root.querySelectorAll('*').forEach((el) => {
+            if (el.shadowRoot) walk(el.shadowRoot);
+          });
+        };
+        walk(doc);
+        const lines = [];
+        gds.forEach((gd, gi) => {
+          (gd.data || []).forEach((tr, ti) => {
+            if (tr.type !== 'sankey') return;
+            const {label, x, y} = tr.node;
+            const title = (gd.layout && gd.layout.title &&
+              (gd.layout.title.text || gd.layout.title)) || '';
+            lines.push(`# plot ${gi}, trace ${ti} — ${title}`);
+            lines.push('_NODE_X = {');
+            label.forEach((l, i) => lines.push(
+              `    ${JSON.stringify(l)}: ${fmt(x[i])},`));
+            lines.push('}');
+            lines.push('_NODE_Y = {');
+            label.forEach((l, i) => lines.push(
+              `    ${JSON.stringify(l)}: ${fmt(y[i])},`));
+            lines.push('}');
+          });
+        });
+        const text = lines.join('\\n');
+        console.log(text || '(no sankey plots found)');
+        const clip = window.parent.navigator.clipboard;
+        if (clip && text) {
+          clip.writeText(text).then(
+            () => console.log('(copied to clipboard)'),
+            (e) => console.warn('clipboard write failed:', e),
+          );
+        }
+      });
+    })();
+    </script>
+    """
+    mo.iframe(_html, height="50px")
+    return
+
+
+@app.cell
 def _(focus_nodes, mo):
     """Node-selector for the §1c breakdown. Independent of the plotly
     `updatemenus` dropdown inside §1b — that one only restyles ribbon
