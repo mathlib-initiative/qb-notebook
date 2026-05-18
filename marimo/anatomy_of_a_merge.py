@@ -13,7 +13,7 @@ def _():
     return (mo,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md("""
     # Anatomy of a merge
@@ -43,7 +43,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _():
     import sys
     from pathlib import Path
@@ -111,7 +111,7 @@ def _():
     )
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(Path, datetime, load_pr_interval_data, pl, timezone):
     """Load parquet + join `core_user` so PRs carry `author_login`."""
     _data_dir = Path(__file__).resolve().parents[1] / "data"
@@ -130,7 +130,7 @@ def _(Path, datetime, load_pr_interval_data, pl, timezone):
     return asof, events, inline_comments, prs_raw, queue_windows, users
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(
     DEFAULT_LINES_BREAKS,
     asof,
@@ -178,7 +178,7 @@ def _(
     return lines_bucket_order, prs_enriched
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(
     MATHLIB_LABEL_RETIRED_AT,
     asof,
@@ -212,7 +212,7 @@ def _(
     return (t_intervals,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     """Cohort dropdown. Post-MM is the default since the `maintainer-merge`
     label only exists from 2024-02-15, so the headline funnel is only
@@ -248,9 +248,138 @@ def _(mo):
     return cohort, sankey_height, show_cycle_branches
 
 
-@app.cell
-def _(cohort, datetime, pl, prs_enriched, timezone):
-    """Apply the cohort filter on `gh_created_at`."""
+@app.cell(hide_code=True)
+def _(pr_type_order, t_intervals):
+    """Filter-option menus for the topic-label and PR-type pickers.
+    Sourced from the full mathlib history (not the current cohort) so
+    the menus don't shrink as the user narrows the date range.
+
+    `TOPIC_NONE` is a pseudo-bucket for PRs that never carried any t-*
+    label — uncheck it to exclude unlabeled PRs from the cohort, leave
+    it checked alongside specific labels to keep them in."""
+    TOPIC_NONE = "(none)"
+    available_topics = sorted(
+        t_intervals.get_column("label_name").unique().to_list()
+    ) + [TOPIC_NONE]
+    available_pr_types = pr_type_order()
+    return TOPIC_NONE, available_pr_types, available_topics
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    """All/None buttons for the topic filter. Clicking either rebuilds
+    the checkbox grid below with new defaults — each button is wired as
+    a click counter (`value=0` + `on_click=lambda v: v + 1`), and the
+    downstream cell compares the two to pick the winning default
+    (ties resolve to All)."""
+    topic_all_btn = mo.ui.button(label="All topics", value=0, on_click=lambda v: v + 1)
+    topic_none_btn = mo.ui.button(label="None", value=0, on_click=lambda v: v + 1)
+    return topic_all_btn, topic_none_btn
+
+
+@app.cell(hide_code=True)
+def _(available_topics, mo, topic_all_btn, topic_none_btn):
+    """Topic-label checkbox grid. A PR passes the filter iff it ever
+    carried at least one of the checked t-* labels (plus the unlabeled
+    bucket if `(none)` is checked). Default is All so the page renders
+    with the same cohort as before filters existed."""
+    _default = topic_all_btn.value >= topic_none_btn.value
+    topic_checks = mo.ui.array(
+        [mo.ui.checkbox(value=_default, label=lbl) for lbl in available_topics]
+    )
+    return (topic_checks,)
+
+
+@app.cell(hide_code=True)
+def _(available_topics, mo, topic_all_btn, topic_checks, topic_none_btn):
+    """Render the topic filter. Lives in a separate cell from
+    `topic_checks` because marimo forbids reading a UIElement's
+    `.value` in the cell that created it (needed here for the
+    `N/M selected` header count)."""
+    _n_selected = sum(1 for v in topic_checks.value if v)
+    mo.accordion(
+        {
+            f"Topic filter ({_n_selected}/{len(available_topics)} selected)": mo.vstack(
+                [
+                    mo.hstack(
+                        [topic_all_btn, topic_none_btn],
+                        justify="start",
+                    ),
+                    mo.hstack(list(topic_checks), wrap=True, justify="start"),
+                ]
+            )
+        }
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    """All/None buttons for the PR-type filter. Same click-counter
+    pattern as the topic buttons."""
+    pr_type_all_btn = mo.ui.button(label="All types", value=0, on_click=lambda v: v + 1)
+    pr_type_none_btn = mo.ui.button(label="None", value=0, on_click=lambda v: v + 1)
+    return pr_type_all_btn, pr_type_none_btn
+
+
+@app.cell(hide_code=True)
+def _(available_pr_types, mo, pr_type_all_btn, pr_type_none_btn):
+    """PR-type checkbox grid (parsed conventional-commit prefix)."""
+    _default = pr_type_all_btn.value >= pr_type_none_btn.value
+    pr_type_checks = mo.ui.array(
+        [mo.ui.checkbox(value=_default, label=t) for t in available_pr_types]
+    )
+    return (pr_type_checks,)
+
+
+@app.cell(hide_code=True)
+def _(
+    available_pr_types,
+    mo,
+    pr_type_all_btn,
+    pr_type_checks,
+    pr_type_none_btn,
+):
+    """Render the PR-type filter. Split from `pr_type_checks` for the
+    same reason as the topic filter — see that cell."""
+    _n_selected = sum(1 for v in pr_type_checks.value if v)
+    mo.accordion(
+        {
+            f"PR-type filter ({_n_selected}/{len(available_pr_types)} selected)": mo.vstack(
+                [
+                    mo.hstack(
+                        [pr_type_all_btn, pr_type_none_btn],
+                        justify="start",
+                    ),
+                    mo.hstack(list(pr_type_checks), wrap=True, justify="start"),
+                ]
+            )
+        }
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    TOPIC_NONE,
+    available_pr_types,
+    available_topics,
+    cohort,
+    datetime,
+    pl,
+    pr_type_checks,
+    prs_enriched,
+    t_intervals,
+    timezone,
+    topic_checks,
+):
+    """Apply the cohort + topic + PR-type filters to `prs_enriched`.
+    Date filter is on `gh_created_at`; topic filter keeps PRs whose ID
+    appears in `t_intervals` under any selected t-* label, and unions
+    in the unlabeled bucket when `TOPIC_NONE` is checked; PR-type
+    filter is a column-level `is_in` on the parsed conventional prefix.
+    If a sub-filter has nothing selected, the cohort collapses to
+    empty — that matches the literal "no PRs match" reading."""
     _COHORT_BOUNDS = {
         "post_mm": (datetime(2024, 2, 15, tzinfo=timezone.utc), None),
         "2024": (
@@ -270,11 +399,31 @@ def _(cohort, datetime, pl, prs_enriched, timezone):
     if _hi is not None:
         _expr = _expr & (pl.col("gh_created_at") < _hi)
     prs_cohort = prs_enriched.filter(_expr)
+
+    _selected_topics = [t for t, v in zip(available_topics, topic_checks.value) if v]
+    if len(_selected_topics) < len(available_topics):
+        _selected_real = [t for t in _selected_topics if t != TOPIC_NONE]
+        _none_selected = TOPIC_NONE in _selected_topics
+        _real_ids = (
+            t_intervals.filter(pl.col("label_name").is_in(_selected_real))
+            .get_column("pull_request_id")
+            .unique()
+        )
+        _keep_expr = pl.col("id").is_in(_real_ids)
+        if _none_selected:
+            _all_t_ids = t_intervals.get_column("pull_request_id").unique()
+            _keep_expr = _keep_expr | ~pl.col("id").is_in(_all_t_ids)
+        prs_cohort = prs_cohort.filter(_keep_expr)
+
+    _selected_types = [t for t, v in zip(available_pr_types, pr_type_checks.value) if v]
+    if len(_selected_types) < len(available_pr_types):
+        prs_cohort = prs_cohort.filter(pl.col("pr_type").is_in(_selected_types))
+
     cohort_label = cohort.value
     return cohort_label, prs_cohort
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(
     DEFAULT_BOT_ACTORS,
     asof,
@@ -344,7 +493,7 @@ def _(
     return (pipeline,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(pipeline, pl, prs_cohort):
     """Wide per-PR frame: pipeline + shape/area-friendly attributes +
     terminal-state classification used downstream by the Sankey, the
@@ -399,7 +548,7 @@ def _(pipeline, pl, prs_cohort):
     return (pr_pipeline,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(labels_active_at, pl, pr_pipeline, t_intervals):
     """Attribute merged PRs to the `t-*` label active at their merge time.
     Each PR can have multiple active `t-*` labels (e.g. `t-algebra` +
@@ -424,7 +573,7 @@ def _(labels_active_at, pl, pr_pipeline, t_intervals):
     return (pr_topic_one,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(cohort_label, mo, pl, pr_pipeline):
     """Cohort summary table — milestone counts + drop-off percentages."""
     _n = pr_pipeline.height
@@ -488,7 +637,7 @@ def _(cohort_label, mo, pl, pr_pipeline):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md("""
     ## 1. Lifecycle Sankey
@@ -513,7 +662,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(go, pr_pipeline, sankey_height, show_cycle_branches):
     """Build the Sankey from per-PR path classifications.
 
@@ -694,7 +843,7 @@ def _(go, pr_pipeline, sankey_height, show_cycle_branches):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md("""
     ## 1b. Slide-friendly focus-mode Sankey
@@ -712,7 +861,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(go, pr_pipeline, sankey_height):
     """Focus-mode Sankey: reuses §1's edge accumulation but always
     includes cycle nodes and embeds a plotly-native focus dropdown so a
