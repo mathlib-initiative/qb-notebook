@@ -625,27 +625,27 @@ def _(go, pr_pipeline, sankey_height, show_cycle_branches):
     # can drop below them without crossing.
     _NODE_X = {
         "opened": 0.001,
-        "1 queue cycle": 0.14,
-        "2 queue cycles": 0.30,
-        "3+ queue cycles": 0.46,
-        "maintainer-merge": 0.62,
-        "bors r+": 0.78,
-        "delegated": 0.78,
+        "1 queue cycle": 0.130,
+        "2 queue cycles": 0.307,
+        "3+ queue cycles": 0.550,
+        "maintainer-merge": 0.636,
+        "bors r+": 0.835,
+        "delegated": 0.835,
         "merged": 0.999,
         "closed unmerged": 0.999,
         "still open": 0.999,
     }
     _NODE_Y = {
-        "opened": 0.5,
-        "1 queue cycle": 0.05,
-        "2 queue cycles": 0.05,
-        "3+ queue cycles": 0.05,
-        "maintainer-merge": 0.22,
-        "bors r+": 0.50,
-        "delegated": 0.72,
-        "merged": 0.30,
-        "closed unmerged": 0.72,
-        "still open": 0.95,
+        "opened": 0.500,
+        "1 queue cycle": 0.432,
+        "2 queue cycles": 0.466,
+        "3+ queue cycles": 0.509,
+        "maintainer-merge": 0.095,
+        "bors r+": 0.223,
+        "delegated": 0.577,
+        "merged": 0.300,
+        "closed unmerged": 0.720,
+        "still open": 0.950,
     }
 
     # Sort links so within each source node, ribbons stack top-to-bottom
@@ -686,7 +686,7 @@ def _(go, pr_pipeline, sankey_height, show_cycle_branches):
     )
     sankey_fig.update_layout(
         title="Lifecycle flow — counts of PRs traversing each segment",
-        font=dict(size=12),
+        font=dict(size=12,color="#A00"),
         height=int(sankey_height.value),
         margin=dict(l=10, r=10, t=60, b=20),
     )
@@ -789,27 +789,27 @@ def _(go, pr_pipeline, sankey_height):
     # ribbon paths — same layout as §1; see that cell for the rationale.
     _NODE_X = {
         "opened": 0.001,
-        "1 queue cycle": 0.14,
-        "2 queue cycles": 0.30,
-        "3+ queue cycles": 0.46,
-        "maintainer-merge": 0.62,
-        "bors r+": 0.78,
-        "delegated": 0.78,
+        "1 queue cycle": 0.130,
+        "2 queue cycles": 0.307,
+        "3+ queue cycles": 0.550,
+        "maintainer-merge": 0.636,
+        "bors r+": 0.835,
+        "delegated": 0.835,
         "merged": 0.999,
         "closed unmerged": 0.999,
         "still open": 0.999,
     }
     _NODE_Y = {
-        "opened": 0.5,
-        "1 queue cycle": 0.05,
-        "2 queue cycles": 0.05,
-        "3+ queue cycles": 0.05,
-        "maintainer-merge": 0.22,
-        "bors r+": 0.50,
-        "delegated": 0.72,
-        "merged": 0.30,
-        "closed unmerged": 0.72,
-        "still open": 0.95,
+        "opened": 0.500,
+        "1 queue cycle": 0.432,
+        "2 queue cycles": 0.466,
+        "3+ queue cycles": 0.509,
+        "maintainer-merge": 0.095,
+        "bors r+": 0.223,
+        "delegated": 0.577,
+        "merged": 0.300,
+        "closed unmerged": 0.720,
+        "still open": 0.950,
     }
 
     # Per-link arrays, sorted so ribbons stack top-to-bottom by target y
@@ -860,21 +860,48 @@ def _(go, pr_pipeline, sankey_height):
         return {(a, b) for (a, b) in _edges_list if a == node or b == node}
 
     _n_opened = _sum_from("opened")
+    # Each focus carries the focus-node name (or None for the "All
+    # segments" reset) so `_colors_for` can split incoming vs outgoing
+    # ribbons by direction. `_node_edges` is unused now but kept above
+    # in case a future focus mode wants undirected highlighting.
+    _ = _node_edges
     _focuses = [
         (
             "All segments",
-            set(_edges_list),
+            None,
             f"<b>Full lifecycle</b> — {_n_opened:,} PRs",
         ),
     ]
     for _n in _nodes:
-        _focuses.append((_n, _node_edges(_n), _node_title(_n)))
+        _focuses.append((_n, _n, _node_title(_n)))
 
     _DIM = "rgba(200,200,200,0.18)"
-    _BRIGHT = "rgba(74,144,217,0.5)"
 
-    def _colors_for(focus_edges: set) -> list[str]:
-        return [_BRIGHT if (a, b) in focus_edges else _DIM for (a, b) in _edges_list]
+    def _hex_to_rgba(h: str, alpha: float) -> str:
+        h = h.lstrip("#")
+        if len(h) == 3:
+            h = "".join(c * 2 for c in h)
+        r, g, bl = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        return f"rgba({r},{g},{bl},{alpha})"
+
+    _NODE_RGBA = {n: _hex_to_rgba(c, 0.55) for n, c in _node_colors_map.items()}
+
+    def _colors_for(focus_node: str | None) -> list[str]:
+        # Ribbons inherit their non-focus endpoint's node color, so each
+        # flow visually points to the segment it connects to. In the
+        # "All segments" view (no focus), we fall back to coloring by
+        # source — the conventional Plotly-Sankey default.
+        if focus_node is None:
+            return [_NODE_RGBA.get(a, _DIM) for (a, b) in _edges_list]
+        out = []
+        for a, b in _edges_list:
+            if b == focus_node:
+                out.append(_NODE_RGBA.get(a, _DIM))  # incoming → color by source
+            elif a == focus_node:
+                out.append(_NODE_RGBA.get(b, _DIM))  # outgoing → color by target
+            else:
+                out.append(_DIM)
+        return out
 
     sankey_focus_fig = go.Figure(
         data=[
@@ -918,20 +945,20 @@ def _(go, pr_pipeline, sankey_height):
         updatemenus=[
             dict(
                 buttons=_buttons,
-                direction="down",
+                direction="up",
                 showactive=True,
                 x=0.01,
-                y=1.18,
+                y=-0.02,
                 xanchor="left",
                 yanchor="top",
-                pad=dict(r=10, t=10),
+                pad=dict(r=10, t=4, b=4),
                 bgcolor="white",
                 bordercolor="#bbb",
             )
         ],
         height=int(sankey_height.value),
-        margin=dict(l=10, r=10, t=100, b=20),
-        font=dict(size=12),
+        margin=dict(l=10, r=10, t=60, b=70),
+        font=dict(size=12, color="#A00"),
     )
     sankey_focus_fig
     return
