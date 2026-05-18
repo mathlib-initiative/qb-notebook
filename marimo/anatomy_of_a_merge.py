@@ -686,7 +686,7 @@ def _(go, pr_pipeline, sankey_height, show_cycle_branches):
     )
     sankey_fig.update_layout(
         title="Lifecycle flow — counts of PRs traversing each segment",
-        font=dict(size=12,color="#A00"),
+        font=dict(size=12, color="#A00"),
         height=int(sankey_height.value),
         margin=dict(l=10, r=10, t=60, b=20),
     )
@@ -848,13 +848,13 @@ def _(go, pr_pipeline, sankey_height):
     # view. Source nodes (no incoming) and sink nodes (no outgoing) get
     # the corresponding half omitted so the title stays compact.
     def _node_title(node: str) -> str:
-        n_in = _sum_into(node)
-        n_out = _sum_from(node)
-        if n_in == 0:
-            return f"<b>{node}</b> — {n_out:,} out"
-        if n_out == 0:
-            return f"<b>{node}</b> — {n_in:,} in"
-        return f"<b>{node}</b> — {n_in:,} in · {n_out:,} out"
+        # Every PR is counted exactly once both into and out of an
+        # internal node (paths terminate at merged / closed / still-open
+        # sinks), so `n_in == n_out` for internals. Source / sink nodes
+        # only have one side. `max(...)` collapses all three cases to a
+        # single "N PRs" count.
+        n = max(_sum_into(node), _sum_from(node))
+        return f"<b>{node}</b> — {n:,} PRs"
 
     def _node_edges(node: str) -> set:
         return {(a, b) for (a, b) in _edges_list if a == node or b == node}
@@ -960,7 +960,122 @@ def _(go, pr_pipeline, sankey_height):
         margin=dict(l=10, r=10, t=60, b=70),
         font=dict(size=12, color="#A00"),
     )
+
+    # Exported for §1c (downstream breakdown cell). Copied out of the
+    # `_`-prefixed cell-locals so a single source of truth feeds the
+    # Sankey, the focus dropdown, and the breakdown bar charts/tables.
+    focus_edge_counts = dict(_edge_counts)
+    focus_nodes = list(_nodes)
+    focus_node_colors = dict(_node_colors_map)
+
     sankey_focus_fig
+    return focus_edge_counts, focus_node_colors, focus_nodes
+
+
+@app.cell
+def _(focus_nodes, mo):
+    """Node-selector for the §1c breakdown. Independent of the plotly
+    `updatemenus` dropdown inside §1b — that one only restyles ribbon
+    colors and a title inside the figure; it can't drive a downstream
+    cell because marimo never sees which option is selected."""
+    breakdown_node = mo.ui.dropdown(
+        options=focus_nodes,
+        value=focus_nodes[0] if focus_nodes else None,
+        label="Breakdown node",
+    )
+    breakdown_node
+    return (breakdown_node,)
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 1c. In/out flow breakdown for the selected node
+
+    Pick a node above to see exactly which segments feed into it and
+    where they go next, with PR counts and share-of-flow. Source nodes
+    (`opened`) only have an outgoing table; sink nodes (`merged`,
+    `closed unmerged`, `still open`) only have an incoming one.
+    """)
+    return
+
+
+@app.cell
+def _(breakdown_node, focus_edge_counts, focus_node_colors, mo, plt):
+    """Render incoming + outgoing flow breakdowns for `breakdown_node` as
+    side-by-side horizontal bar charts. Tables are emitted below the
+    figure via `mo.ui.table` (counts + share-of-flow) so the exact
+    numbers are inspectable without squinting at bar tips."""
+    _node = breakdown_node.value
+    _in_edges = sorted(
+        ((a, v) for (a, b), v in focus_edge_counts.items() if b == _node),
+        key=lambda t: -t[1],
+    )
+    _out_edges = sorted(
+        ((b, v) for (a, b), v in focus_edge_counts.items() if a == _node),
+        key=lambda t: -t[1],
+    )
+    _n_in = sum(v for _, v in _in_edges)
+    _n_out = sum(v for _, v in _out_edges)
+
+    _fig, _axes = plt.subplots(1, 2, figsize=(10, 3.2))
+    for _ax, _edges, _total, _title in (
+        (_axes[0], _in_edges, _n_in, f"incoming — {_n_in:,} PRs"),
+        (_axes[1], _out_edges, _n_out, f"outgoing — {_n_out:,} PRs"),
+    ):
+        if not _edges:
+            _ax.set_axis_off()
+            _ax.text(0.5, 0.5, "(none)", ha="center", va="center", color="#888")
+            _ax.set_title(_title, fontsize=10)
+            continue
+        _labels = [n for n, _ in _edges]
+        _values = [v for _, v in _edges]
+        _colors = [focus_node_colors.get(n, "#888") for n in _labels]
+        _y = range(len(_labels))
+        _ax.barh(_y, _values, color=_colors, edgecolor="white")
+        _ax.set_yticks(list(_y))
+        _ax.set_yticklabels(_labels)
+        _ax.invert_yaxis()
+        for _i, _v in enumerate(_values):
+            _share = _v / _total if _total else 0
+            _ax.text(
+                _v,
+                _i,
+                f"  {_v:,} ({_share:.0%})",
+                va="center",
+                fontsize=9,
+                color="#333",
+            )
+        _ax.set_title(_title, fontsize=10)
+        _ax.spines["top"].set_visible(False)
+        _ax.spines["right"].set_visible(False)
+        _ax.tick_params(axis="x", labelsize=8)
+        _ax.set_xlim(0, max(_values) * 1.25)
+    _fig.suptitle(f"{_node} — flow breakdown", fontsize=12)
+    _fig.tight_layout()
+
+    def _table(edges, total):
+        return [
+            {
+                "node": n,
+                "PRs": v,
+                "share": f"{(v / total if total else 0):.1%}",
+            }
+            for n, v in edges
+        ]
+
+    _in_table = mo.ui.table(
+        _table(_in_edges, _n_in),
+        label="incoming",
+        selection=None,
+    )
+    _out_table = mo.ui.table(
+        _table(_out_edges, _n_out),
+        label="outgoing",
+        selection=None,
+    )
+
+    mo.vstack([_fig, mo.hstack([_in_table, _out_table], widths="equal")])
     return
 
 
