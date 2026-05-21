@@ -5,6 +5,7 @@ import polars as pl
 from qb_notebook.assignments import (
     ASSIGNMENT_BOT_ACTORS,
     assignment_policy_outcome,
+    assignment_responses,
     classify_assignment_events,
     classify_unassign_events,
     pr_assignees_ever,
@@ -224,6 +225,118 @@ def test_review_request_responses_empty_input() -> None:
     assert out.height == 0
     assert "responded" in out.columns
     assert "response_gap_seconds" in out.columns
+
+
+# --------------------------------------------------------------------- assignment response
+
+
+def test_assignment_responses_basic_match_and_kind() -> None:
+    ev = _events(
+        [
+            # PR 1: bot-assigns alice; alice comments two hours later.
+            _row(
+                id=1,
+                pr=1,
+                when=_dt(1, 9),
+                type="ASSIGNED",
+                actor="mathlib-triage",
+                assignee="alice",
+            ),
+            # Earlier alice comment — must not match (pre-assignment).
+            _row(id=2, pr=1, when=_dt(1, 8), type="REVIEW_COMMENTED", actor="alice"),
+            _row(id=3, pr=1, when=_dt(1, 11), type="REVIEW_COMMENTED", actor="alice"),
+            # Approval later — must not shadow the earlier comment.
+            _row(id=4, pr=1, when=_dt(2), type="REVIEW_APPROVED", actor="alice"),
+            # PR 2: self-assign with a self-unassign response.
+            _row(
+                id=5,
+                pr=2,
+                when=_dt(1, 9),
+                type="ASSIGNED",
+                actor="bob",
+                assignee="bob",
+            ),
+            _row(
+                id=6,
+                pr=2,
+                when=_dt(1, 12),
+                type="UNASSIGNED",
+                actor="bob",
+                assignee="bob",
+            ),
+            # PR 3: maintainer-assigns carol who never responds.
+            _row(
+                id=7,
+                pr=3,
+                when=_dt(1),
+                type="ASSIGNED",
+                actor="dan",
+                assignee="carol",
+            ),
+            # Comment by a non-assignee on PR 3 — should not match.
+            _row(id=8, pr=3, when=_dt(2), type="ISSUE_COMMENTED", actor="eve"),
+        ]
+    )
+    out = assignment_responses(ev).sort("assignment_event_id")
+    assert out.height == 3
+
+    pr1 = out.row(0, named=True)
+    assert pr1["pull_request_id"] == 1
+    assert pr1["kind"] == "bot"
+    assert pr1["responded"] is True
+    assert pr1["response_event_type"] == "REVIEW_COMMENTED"
+    assert pr1["response_gap_seconds"] == 7200.0
+
+    pr2 = out.row(1, named=True)
+    assert pr2["kind"] == "self"
+    assert pr2["response_event_type"] == "UNASSIGNED"
+    assert pr2["response_gap_seconds"] == 10800.0
+
+    pr3 = out.row(2, named=True)
+    assert pr3["kind"] == "other_human"
+    assert pr3["responded"] is False
+    assert pr3["responded_at"] is None
+    assert pr3["response_gap_seconds"] is None
+
+
+def test_assignment_responses_re_assignment_each_row_matches_separately() -> None:
+    # alice is assigned twice; each ASSIGNED gets its own row. The
+    # earliest action by alice at-or-after each assignment is the match,
+    # so the first re-assignment can match the same later comment.
+    ev = _events(
+        [
+            _row(
+                id=1, pr=1, when=_dt(1), type="ASSIGNED", actor="bot", assignee="alice"
+            ),
+            _row(
+                id=2,
+                pr=1,
+                when=_dt(2),
+                type="UNASSIGNED",
+                actor="alice",
+                assignee="alice",
+            ),
+            _row(
+                id=3, pr=1, when=_dt(3), type="ASSIGNED", actor="bot", assignee="alice"
+            ),
+            _row(id=4, pr=1, when=_dt(5), type="REVIEW_COMMENTED", actor="alice"),
+        ]
+    )
+    out = assignment_responses(ev).sort("assignment_event_id")
+    assert out.height == 2
+    # First ASSIGNED → first response is the self-UNASSIGNED.
+    assert out.row(0, named=True)["response_event_type"] == "UNASSIGNED"
+    # Second ASSIGNED → the post-reassignment comment.
+    assert out.row(1, named=True)["response_event_type"] == "REVIEW_COMMENTED"
+
+
+def test_assignment_responses_empty_input() -> None:
+    ev = _events([])
+    out = assignment_responses(ev)
+    assert out.height == 0
+    assert "responded" in out.columns
+    assert "response_gap_seconds" in out.columns
+    assert "kind" in out.columns
 
 
 # --------------------------------------------------------------------- assignee sets

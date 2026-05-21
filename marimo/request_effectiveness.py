@@ -5,18 +5,6 @@ import marimo
 __generated_with = "0.23.6"
 app = marimo.App(width="medium")
 
-# Run interactively:  uv run marimo edit marimo/request_effectiveness.py
-# Serve read-only:    uv run marimo run  marimo/request_effectiveness.py
-#
-# Five sections, all gated by the cohort + topic + PR-type filters
-# below the title (same pattern as `anatomy_of_a_merge.py`):
-#
-#   §1  Review-request response — rate + latency CDF + stratified table
-#   §2  Latency lift — within-PR before/after, plus cross-PR matched
-#   §3  Assignment-policy outcome — did any assignee trigger MM?
-#   §4  Churn — request removals, unassign kinds, downstream TTM/queue
-#   §5  Who uses manual assignment / review requests most
-
 
 @app.cell
 def _():
@@ -36,10 +24,15 @@ def _(mo):
 
     - **§1** — what fraction of `REVIEW_REQUESTED` events get a
       same-reviewer response, and how long does the response take?
+      **§1b** repeats the analysis for `ASSIGNED` events, broken down
+      by what action the assignee took (review / comment /
+      self-unassign).
     - **§2** — *latency lift*: does requesting a reviewer measurably
       accelerate time-to-first-review? Within-PR (before/after the
       request) for the headline, cross-PR matched on size × area ×
-      author cohort as a robustness check.
+      author cohort as a robustness check. **§2b** repeats the
+      within-PR lift around the first `ASSIGNED` event, split bot vs.
+      manual.
     - **§3** — *assignment-policy outcome*: of PRs with at least one
       `ASSIGNED` event, did **any** assignee end up being the
       inferred trigger of `maintainer-merge`? Stratified by automatic
@@ -48,6 +41,12 @@ def _(mo):
       re-requests; `UNASSIGNED` breakdown by kind (self / bot / other
       human); correlation with downstream time-to-merge.
     - **§5** — who uses manual assignment and review requests most.
+    - **§6** — descriptive histograms of time-to-merge and
+      queue-window durations, grouped by review-request status and
+      assignment kind. **Selection bias warning**: PRs that attract
+      manual assignments are often already stuck, so naive overlays
+      can make assignment *look* harmful. Read against §2's matched /
+      within-PR views.
 
     **Data caveats**: ~65 % of `ASSIGNED` events come from the
     `leanprover-community-bot-assistant` + `mathlib-triage` automation;
@@ -76,6 +75,7 @@ def _():
     from qb_notebook.assignments import (
         ASSIGNMENT_BOT_ACTORS,
         assignment_policy_outcome,
+        assignment_responses,
         classify_assignment_events,
         classify_unassign_events,
         review_request_responses,
@@ -107,6 +107,7 @@ def _():
         MATHLIB_LABEL_RETIRED_AT,
         Path,
         assignment_policy_outcome,
+        assignment_responses,
         attribute_label_events,
         author_cohort,
         bucket_labels,
@@ -185,7 +186,14 @@ def _(
 
 
 @app.cell
-def _(MATHLIB_LABEL_RETIRED_AT, asof, events, label_intervals, pl, prs_enriched):
+def _(
+    MATHLIB_LABEL_RETIRED_AT,
+    asof,
+    events,
+    label_intervals,
+    pl,
+    prs_enriched,
+):
     """`t-*` label intervals for the topic filter (same convention as
     `anatomy_of_a_merge.py` — open intervals run to `asof`)."""
     _t_labels = (
@@ -371,7 +379,7 @@ def _(
         prs_cohort = prs_cohort.filter(pl.col("pr_type").is_in(_selected_types))
 
     cohort_label = cohort.value
-    return cohort_label, prs_cohort
+    return (prs_cohort,)
 
 
 @app.cell
@@ -385,14 +393,11 @@ def _(events, pl, prs_cohort):
 
 @app.cell
 def _(mo, prs_cohort):
-    mo.md(
-        f"**Cohort size**: {prs_cohort.height:,} PRs after filters "
-        f"(of {prs_cohort.height:,} candidates)."
-    )
+    mo.md(f"""
+    **Cohort size**: {prs_cohort.height:,} PRs after filters "
+        f"(of {prs_cohort.height:,} candidates).
+    """)
     return
-
-
-# --------------------------------------------------------------------- §1
 
 
 @app.cell
@@ -542,7 +547,162 @@ def _(lines_bucket_order, mo, pl, prs_cohort, rr_responses):
     return
 
 
-# --------------------------------------------------------------------- §2
+@app.cell
+def _(mo):
+    mo.md("""
+    ## §1b — Assignment response: did the assignee do anything?
+
+    Same machinery as §1, but pivoted on `ASSIGNED` events. For each
+    assignment we look for the earliest subsequent event on the same
+    PR by the *assignee*; the response type is recorded so we can see
+    the breakdown of what assignees actually do first (review,
+    comment, self-unassign…).
+
+    `UNASSIGNED` is included as a valid response type because a
+    self-unassign is a meaningful "decline". Bot vs. manual
+    assignments are reported separately — they're qualitatively
+    different (the bot rotates the queue, a maintainer assigns when
+    they want a specific human on the PR).
+    """)
+    return
+
+
+@app.cell
+def _(assignment_responses, events_cohort):
+    """Per-assignment response frame. `kind` and `response_event_type`
+    come directly out of the helper, no extra joins needed."""
+    asg_responses = assignment_responses(events_cohort)
+    return (asg_responses,)
+
+
+@app.cell
+def _(asg_responses, mo, pl):
+    """Headline response rate, split by assignment kind."""
+
+    def _bucket(label: str, expr: pl.Expr):
+        sub = asg_responses.filter(expr)
+        n = sub.height
+        responded = sub.filter(pl.col("responded")).height
+        return {
+            "stratum": label,
+            "assignments": n,
+            "responded": responded,
+            "response_rate": round(responded / n, 3) if n else None,
+        }
+
+    _table = pl.DataFrame(
+        [
+            _bucket("all", pl.lit(True)),
+            _bucket("bot-assigned", pl.col("kind") == "bot"),
+            _bucket("self-assigned", pl.col("kind") == "self"),
+            _bucket("other-human assigned", pl.col("kind") == "other_human"),
+        ]
+    )
+
+    mo.vstack(
+        [
+            mo.md(
+                "**Response rate by assignment kind.** *Response* = first event "
+                "on the PR by the assignee whose type is in "
+                "`{REVIEW_APPROVED, REVIEW_COMMENTED, REVIEW_CHANGES_REQUESTED, "
+                "ISSUE_COMMENTED, UNASSIGNED}` at or after the assignment."
+            ),
+            _table,
+        ]
+    )
+    return
+
+
+@app.cell
+def _(asg_responses, mo, pl):
+    """Breakdown of *what* the response was, split by assignment kind."""
+    _responded = asg_responses.filter(pl.col("responded"))
+    _by_type = (
+        _responded.group_by(["kind", "response_event_type"])
+        .agg(pl.len().alias("n"))
+        .with_columns(
+            (pl.col("n") / pl.col("n").sum().over("kind"))
+            .round(3)
+            .alias("share_within_kind")
+        )
+        .sort(["kind", "n"], descending=[False, True])
+    )
+    mo.vstack(
+        [
+            mo.md(
+                "**First-action breakdown.** For responded assignments only — "
+                "what was the assignee's first move? `UNASSIGNED` rows are "
+                "self-unassigns ('decline'); `ISSUE_COMMENTED` is a substantive "
+                "comment short of a formal review."
+            ),
+            _by_type,
+        ]
+    )
+    return
+
+
+@app.cell
+def _(asg_responses, np, pl, plt):
+    """CDF of response latency, faceted by assignment `kind` and overlaid
+    by response event type. Log-scale x-axis matches §1's CDF."""
+    _resp = asg_responses.filter(pl.col("responded")).with_columns(
+        (pl.col("response_gap_seconds") / 3600.0).alias("gap_h"),
+    )
+
+    _kinds = ["bot", "self", "other_human"]
+    _types = [
+        "REVIEW_APPROVED",
+        "REVIEW_COMMENTED",
+        "REVIEW_CHANGES_REQUESTED",
+        "ISSUE_COMMENTED",
+        "UNASSIGNED",
+    ]
+    _palette = {
+        "REVIEW_APPROVED": "#2a9d8f",
+        "REVIEW_COMMENTED": "#4c72b0",
+        "REVIEW_CHANGES_REQUESTED": "#e76f51",
+        "ISSUE_COMMENTED": "#8da0cb",
+        "UNASSIGNED": "#c44e52",
+    }
+
+    _fig, _axes = plt.subplots(1, 3, figsize=(13, 4), sharex=True, sharey=True)
+    for _ax, _kind in zip(_axes, _kinds):
+        _sub = _resp.filter(pl.col("kind") == _kind)
+        if _sub.is_empty():
+            _ax.text(0.5, 0.5, f"No {_kind} assignments", ha="center", va="center")
+            _ax.set_axis_off()
+            continue
+        _all = np.sort(_sub.get_column("gap_h").to_numpy())
+        _ax.plot(
+            _all,
+            np.arange(1, len(_all) + 1) / len(_all),
+            color="black",
+            lw=2,
+            label=f"any  (n={len(_all):,})",
+        )
+        for _t in _types:
+            _vals = _sub.filter(pl.col("response_event_type") == _t).get_column("gap_h")
+            if _vals.is_empty():
+                continue
+            _arr = np.sort(_vals.to_numpy())
+            _ax.plot(
+                _arr,
+                np.arange(1, len(_arr) + 1) / len(_arr),
+                color=_palette[_t],
+                lw=1.2,
+                alpha=0.8,
+                label=f"{_t.lower()}  (n={len(_arr):,})",
+            )
+        _ax.set_xscale("log")
+        _ax.set_xlabel("hours from ASSIGNED → first action (log)")
+        _ax.set_title(f"kind = {_kind}")
+        _ax.grid(alpha=0.3)
+        _ax.legend(fontsize=7, loc="lower right")
+    _axes[0].set_ylabel("CDF")
+    _fig.suptitle("Assignment response latency by kind × first-action type")
+    _fig.tight_layout()
+    _fig
+    return
 
 
 @app.cell
@@ -846,7 +1006,147 @@ def _(events_cohort, mo, pl, prs_cohort, t_intervals):
     return
 
 
-# --------------------------------------------------------------------- §3
+@app.cell
+def _(mo):
+    mo.md("""
+    ## §2b — Engagement lift around the first assignment
+
+    Same within-PR before/after log-ratio plot as §2's top panel, but
+    pivoted on each PR's first `ASSIGNED` event. Split by `kind` of
+    that first assignment:
+
+    - **bot**: queue-rotation by `leanprover-community-bot-assistant`
+      / `mathlib-triage`. Heavy left tail expected because the bot
+      typically assigns when the PR is *already* on the queue
+      awaiting reviewer attention — there's often nothing to
+      "trigger" past the existing state.
+    - **manual** (`self` + `other_human` collapsed): a human chose
+      this assignee. More likely to coincide with a genuine attention
+      shift, so we'd expect a higher median lift if assignments
+      "work".
+
+    Engagement = same definition as §2 (non-author, non-bot
+    `REVIEW_*` / `ISSUE_COMMENTED` events). 7-day windows on either
+    side; values smoothed with +0.5 in both numerator and denominator.
+    """)
+    return
+
+
+@app.cell
+def _(ASSIGNMENT_BOT_ACTORS, events_cohort, np, pl, plt, prs_cohort):
+    """Within-PR engagement lift, pivoted on first ASSIGNED, split bot vs.
+    manual. Mirrors the §2 cell at line ~570."""
+    _WINDOW_DAYS = 7
+    _WINDOW_S = _WINDOW_DAYS * 86400
+    _RESPONSE_TYPES = (
+        "REVIEW_APPROVED",
+        "REVIEW_COMMENTED",
+        "REVIEW_CHANGES_REQUESTED",
+        "ISSUE_COMMENTED",
+    )
+    _BOTS = (
+        "github-actions",
+        "leanprover-community-mathlib4-bot",
+        "leanprover-community-bot-assistant",
+        "mathlib-triage",
+        "mathlib4-merge-conflict-bot",
+        "mathlib4-dependent-issues-bot",
+        "dependabot",
+        "leanprover-radar",
+    )
+
+    _authors = prs_cohort.select(
+        pl.col("id").alias("pull_request_id"),
+        "author_login",
+    )
+
+    # First ASSIGNED per PR + the kind of that first assignment.
+    _asg = events_cohort.filter(pl.col("type") == "ASSIGNED").with_columns(
+        pl.when(pl.col("actor_login").is_in(list(ASSIGNMENT_BOT_ACTORS)))
+        .then(pl.lit("bot"))
+        .otherwise(pl.lit("manual"))
+        .alias("first_kind"),
+    )
+    _first_asg = (
+        _asg.sort(["pull_request_id", "occurred_at"])
+        .group_by("pull_request_id", maintain_order=True)
+        .agg(
+            pl.col("occurred_at").first().alias("first_assigned_at"),
+            pl.col("first_kind").first().alias("first_kind"),
+        )
+    )
+
+    _engagement = (
+        events_cohort.filter(pl.col("type").is_in(_RESPONSE_TYPES))
+        .join(_authors, on="pull_request_id", how="left")
+        .filter(
+            pl.col("actor_login").is_not_null()
+            & (pl.col("actor_login") != pl.col("author_login"))
+            & ~pl.col("actor_login").is_in(_BOTS)
+        )
+        .select("pull_request_id", "occurred_at")
+    )
+
+    _joined = _engagement.join(_first_asg, on="pull_request_id", how="inner")
+    _joined = _joined.with_columns(
+        (pl.col("occurred_at") - pl.col("first_assigned_at"))
+        .dt.total_seconds()
+        .alias("delta_s")
+    )
+
+    _before = (
+        _joined.filter((pl.col("delta_s") < 0) & (pl.col("delta_s") >= -_WINDOW_S))
+        .group_by("pull_request_id")
+        .agg(pl.len().alias("n_before"))
+    )
+    _after = (
+        _joined.filter((pl.col("delta_s") >= 0) & (pl.col("delta_s") < _WINDOW_S))
+        .group_by("pull_request_id")
+        .agg(pl.len().alias("n_after"))
+    )
+    _both = (
+        _first_asg.join(_before, on="pull_request_id", how="left")
+        .join(_after, on="pull_request_id", how="left")
+        .with_columns(
+            pl.col("n_before").fill_null(0),
+            pl.col("n_after").fill_null(0),
+        )
+        .with_columns(
+            ((pl.col("n_after") + 0.5) / (pl.col("n_before") + 0.5))
+            .log()
+            .alias("log_ratio")
+        )
+    )
+
+    _fig, _axes = plt.subplots(1, 2, figsize=(11, 4), sharex=True, sharey=True)
+    for _ax, _kind, _color in [
+        (_axes[0], "bot", "#7570b3"),
+        (_axes[1], "manual", "#d95f02"),
+    ]:
+        _vals = _both.filter(pl.col("first_kind") == _kind).get_column("log_ratio")
+        if _vals.is_empty():
+            _ax.text(0.5, 0.5, f"No {_kind} assignments", ha="center", va="center")
+            _ax.set_axis_off()
+            continue
+        _arr = _vals.to_numpy()
+        _ax.hist(_arr, bins=40, color=_color, alpha=0.8)
+        _med = float(np.median(_arr))
+        _ax.axvline(0, color="black", lw=1, label="no change")
+        _ax.axvline(
+            _med,
+            color="crimson",
+            lw=2,
+            label=f"median = {_med:+.2f} (×{np.exp(_med):.2f})",
+        )
+        _ax.set_xlabel("log(after / before) — 7-day engagement")
+        _ax.set_ylabel("PR count")
+        _ax.set_title(f"first ASSIGNED = {_kind}  (n={len(_arr):,})")
+        _ax.legend(fontsize=8)
+        _ax.grid(alpha=0.3)
+    _fig.suptitle("Within-PR engagement lift around first ASSIGNED")
+    _fig.tight_layout()
+    _fig
+    return
 
 
 @app.cell
@@ -871,7 +1171,6 @@ def _(mo):
 
 @app.cell
 def _(
-    ASSIGNMENT_BOT_ACTORS,
     MAINTAINER_MERGE_LABEL,
     assignment_policy_outcome,
     attribute_label_events,
@@ -940,11 +1239,17 @@ def _(
             _strat,
         ]
     )
-    return (_enriched,)
+    return
 
 
 @app.cell
-def _(ASSIGNMENT_BOT_ACTORS, classify_assignment_events, events_cohort, mo, pl):
+def _(
+    ASSIGNMENT_BOT_ACTORS,
+    classify_assignment_events,
+    events_cohort,
+    mo,
+    pl,
+):
     """When a PR has a manual assignment by another human, who tends to
     be doing the assigning (the user explicitly asked)? Top-N table of
     the actor who applied a non-bot, non-self ASSIGNED event."""
@@ -971,9 +1276,6 @@ def _(ASSIGNMENT_BOT_ACTORS, classify_assignment_events, events_cohort, mo, pl):
         ]
     )
     return
-
-
-# --------------------------------------------------------------------- §4
 
 
 @app.cell
@@ -1170,9 +1472,6 @@ def _(classify_unassign_events, events_cohort, mo, pl, prs_cohort):
     return
 
 
-# --------------------------------------------------------------------- §5
-
-
 @app.cell
 def _(mo):
     mo.md("""
@@ -1230,6 +1529,308 @@ def _(classify_assignment_events, events_cohort, mo, pl):
             ),
         ],
         gap=1,
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## §6 — TTM and queue-cycle distributions by intervention
+
+    Overlaid log-scale histograms of **time-to-merge** (PR open →
+    merge) and **queue-window duration** (one row per queue cycle on
+    `rule_set_id=3`), faceted by:
+
+    - **review-request status**: PRs with at least one
+      `REVIEW_REQUESTED` event vs. PRs that never received one.
+    - **assignment kind** at the PR level: `manual` (any non-bot
+      ASSIGNED event), `bot only`, `none`.
+
+    Density-normalized so groups with different N are comparable.
+
+    **Selection-bias caveat (repeat)**: PRs that attract manual
+    assignments are typically already stuck — a maintainer reaches
+    for the assign button when a PR has been sitting. So the manual
+    bucket is *expected* to skew toward longer durations even if the
+    assignment itself helps on the margin. The §2 within-PR /
+    matched-median panels are the causal-leaning reads; what follows
+    is descriptive.
+    """)
+    return
+
+
+@app.cell
+def _(ASSIGNMENT_BOT_ACTORS, events_cohort, pl, prs_cohort):
+    """Per-PR intervention flags: had_request, assign_kind (none / bot
+    only / manual). Shared by the two §6 histogram cells."""
+    _requested = (
+        events_cohort.filter(pl.col("type") == "REVIEW_REQUESTED")
+        .get_column("pull_request_id")
+        .unique()
+    )
+    _asg = events_cohort.filter(pl.col("type") == "ASSIGNED")
+    _per_pr_asg = _asg.group_by("pull_request_id").agg(
+        pl.col("actor_login")
+        .is_in(list(ASSIGNMENT_BOT_ACTORS))
+        .any()
+        .alias("had_bot_assign"),
+        (~pl.col("actor_login").is_in(list(ASSIGNMENT_BOT_ACTORS)))
+        .any()
+        .alias("had_manual_assign"),
+    )
+
+    pr_intervention = (
+        prs_cohort.select(pl.col("id").alias("pull_request_id"))
+        .with_columns(
+            pl.col("pull_request_id").is_in(_requested).alias("had_request"),
+        )
+        .join(_per_pr_asg, on="pull_request_id", how="left")
+        .with_columns(
+            pl.col("had_bot_assign").fill_null(False),
+            pl.col("had_manual_assign").fill_null(False),
+        )
+        .with_columns(
+            pl.when(pl.col("had_manual_assign"))
+            .then(pl.lit("manual"))
+            .when(pl.col("had_bot_assign"))
+            .then(pl.lit("bot only"))
+            .otherwise(pl.lit("none"))
+            .alias("assign_kind"),
+        )
+    )
+    return (pr_intervention,)
+
+
+@app.cell
+def _(np, pl, plt, pr_intervention, prs_cohort):
+    """TTM histograms, log-scale, faceted by review-request status and
+    by assignment kind. Density-normalized."""
+    _merged = (
+        prs_cohort.filter(pl.col("is_merged"))
+        .select(
+            pl.col("id").alias("pull_request_id"),
+            "gh_created_at",
+            "merged_at_effective",
+        )
+        .join(pr_intervention, on="pull_request_id", how="left")
+        .with_columns(
+            (
+                (
+                    pl.col("merged_at_effective") - pl.col("gh_created_at")
+                ).dt.total_seconds()
+                / 86400.0
+            ).alias("ttm_days")
+        )
+        .filter(pl.col("ttm_days") > 0)
+    )
+
+    _fig, _axes = plt.subplots(1, 2, figsize=(13, 4.5))
+    if _merged.is_empty():
+        for _ax in _axes:
+            _ax.text(0.5, 0.5, "No merged PRs in cohort", ha="center", va="center")
+            _ax.set_axis_off()
+    else:
+        _vals_all = _merged.get_column("ttm_days").to_numpy()
+        _lo = max(_vals_all.min(), 1 / 24.0)
+        _hi = _vals_all.max()
+        _bins = np.logspace(np.log10(_lo), np.log10(_hi), 40)
+
+        _ax = _axes[0]
+        for _label, _expr, _color in [
+            ("no request", ~pl.col("had_request"), "#7f7f7f"),
+            ("had REVIEW_REQUESTED", pl.col("had_request"), "#1f77b4"),
+        ]:
+            _vals = _merged.filter(_expr).get_column("ttm_days").to_numpy()
+            if len(_vals) == 0:
+                continue
+            _med = float(np.median(_vals))
+            _ax.hist(
+                _vals,
+                bins=_bins,
+                density=True,
+                alpha=0.55,
+                color=_color,
+                label=f"{_label}  (n={len(_vals):,}, med={_med:.1f}d)",
+            )
+            _ax.axvline(_med, color=_color, lw=1.5, linestyle="--", alpha=0.9)
+        _ax.set_xscale("log")
+        _ax.set_xlabel("time-to-merge (days, log)")
+        _ax.set_ylabel("density")
+        _ax.set_title("TTM by review-request status")
+        _ax.legend(fontsize=8)
+        _ax.grid(alpha=0.3)
+
+        _ax = _axes[1]
+        for _label, _color in [
+            ("none", "#7f7f7f"),
+            ("bot only", "#7570b3"),
+            ("manual", "#d95f02"),
+        ]:
+            _vals = (
+                _merged.filter(pl.col("assign_kind") == _label)
+                .get_column("ttm_days")
+                .to_numpy()
+            )
+            if len(_vals) == 0:
+                continue
+            _med = float(np.median(_vals))
+            _ax.hist(
+                _vals,
+                bins=_bins,
+                density=True,
+                alpha=0.5,
+                color=_color,
+                label=f"{_label}  (n={len(_vals):,}, med={_med:.1f}d)",
+            )
+            _ax.axvline(_med, color=_color, lw=1.5, linestyle="--", alpha=0.9)
+        _ax.set_xscale("log")
+        _ax.set_xlabel("time-to-merge (days, log)")
+        _ax.set_title("TTM by assignment kind")
+        _ax.legend(fontsize=8)
+        _ax.grid(alpha=0.3)
+    _fig.suptitle("Merged-PR TTM distributions  (descriptive — heavy selection bias)")
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _(asof, np, pl, plt, pr_intervention, queue_windows):
+    """Queue-window-duration histograms (one row per cycle on ruleset 3),
+    same two facets as the TTM panel."""
+    from qb_notebook.review_states import queue_window_intervals
+
+    _qw = queue_window_intervals(queue_windows, rule_set_id=3, asof=asof).join(
+        pr_intervention, on="pull_request_id", how="inner"
+    )
+    _qw = _qw.with_columns(
+        (pl.col("duration_hours") / 24.0).alias("duration_days")
+    ).filter(pl.col("duration_days") > 0)
+
+    _fig, _axes = plt.subplots(1, 2, figsize=(13, 4.5))
+    if _qw.is_empty():
+        for _ax in _axes:
+            _ax.text(0.5, 0.5, "No queue windows in cohort", ha="center", va="center")
+            _ax.set_axis_off()
+    else:
+        _all = _qw.get_column("duration_days").to_numpy()
+        _lo = max(_all.min(), 1 / 24.0)
+        _hi = _all.max()
+        _bins = np.logspace(np.log10(_lo), np.log10(_hi), 40)
+
+        _ax = _axes[0]
+        for _label, _expr, _color in [
+            ("no request", ~pl.col("had_request"), "#7f7f7f"),
+            ("had REVIEW_REQUESTED", pl.col("had_request"), "#1f77b4"),
+        ]:
+            _vals = _qw.filter(_expr).get_column("duration_days").to_numpy()
+            if len(_vals) == 0:
+                continue
+            _med = float(np.median(_vals))
+            _ax.hist(
+                _vals,
+                bins=_bins,
+                density=True,
+                alpha=0.55,
+                color=_color,
+                label=f"{_label}  (n={len(_vals):,}, med={_med:.1f}d)",
+            )
+            _ax.axvline(_med, color=_color, lw=1.5, linestyle="--", alpha=0.9)
+        _ax.set_xscale("log")
+        _ax.set_xlabel("queue-window duration (days, log)")
+        _ax.set_ylabel("density")
+        _ax.set_title("Queue cycle by review-request status")
+        _ax.legend(fontsize=8)
+        _ax.grid(alpha=0.3)
+
+        _ax = _axes[1]
+        for _label, _color in [
+            ("none", "#7f7f7f"),
+            ("bot only", "#7570b3"),
+            ("manual", "#d95f02"),
+        ]:
+            _vals = (
+                _qw.filter(pl.col("assign_kind") == _label)
+                .get_column("duration_days")
+                .to_numpy()
+            )
+            if len(_vals) == 0:
+                continue
+            _med = float(np.median(_vals))
+            _ax.hist(
+                _vals,
+                bins=_bins,
+                density=True,
+                alpha=0.5,
+                color=_color,
+                label=f"{_label}  (n={len(_vals):,}, med={_med:.1f}d)",
+            )
+            _ax.axvline(_med, color=_color, lw=1.5, linestyle="--", alpha=0.9)
+        _ax.set_xscale("log")
+        _ax.set_xlabel("queue-window duration (days, log)")
+        _ax.set_title("Queue cycle by assignment kind")
+        _ax.legend(fontsize=8)
+        _ax.grid(alpha=0.3)
+    _fig.suptitle("Queue-window duration distributions  (one row per cycle, ruleset 3)")
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _(mo, pl, pr_intervention, prs_cohort):
+    """PR-level summary table: median TTM and median total queue time per
+    intervention group, with sample sizes. Numerical companion to the
+    histograms above."""
+    _merged = prs_cohort.filter(pl.col("is_merged")).select(
+        pl.col("id").alias("pull_request_id"),
+        "gh_created_at",
+        "merged_at_effective",
+    )
+    _merged = _merged.join(
+        pr_intervention, on="pull_request_id", how="left"
+    ).with_columns(
+        (
+            (pl.col("merged_at_effective") - pl.col("gh_created_at")).dt.total_seconds()
+            / 86400.0
+        ).alias("ttm_days"),
+    )
+
+    _by_request = (
+        _merged.group_by("had_request")
+        .agg(
+            pl.len().alias("n_prs"),
+            pl.col("ttm_days").median().round(2).alias("median_ttm_d"),
+            pl.col("ttm_days").quantile(0.9).round(2).alias("p90_ttm_d"),
+        )
+        .sort("had_request")
+    )
+    _by_kind = (
+        _merged.group_by("assign_kind")
+        .agg(
+            pl.len().alias("n_prs"),
+            pl.col("ttm_days").median().round(2).alias("median_ttm_d"),
+            pl.col("ttm_days").quantile(0.9).round(2).alias("p90_ttm_d"),
+        )
+        .sort("assign_kind")
+    )
+
+    mo.vstack(
+        [
+            mo.md(
+                "**Per-PR TTM summary.** Same groupings as the histograms; "
+                "useful for reading off concrete numbers."
+            ),
+            mo.hstack(
+                [
+                    mo.vstack([mo.md("**by review-request status**"), _by_request]),
+                    mo.vstack([mo.md("**by assignment kind**"), _by_kind]),
+                ],
+                justify="start",
+                gap=1,
+            ),
+        ]
     )
     return
 

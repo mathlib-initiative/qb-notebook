@@ -55,6 +55,18 @@ REVIEW_RESPONSE_EVENT_TYPES: tuple[str, ...] = (
     "REVIEW_CHANGES_REQUESTED",
 )
 
+# Event types that count as an assignee "responding" to being assigned.
+# Broader than :data:`REVIEW_RESPONSE_EVENT_TYPES` because the assignment
+# policy doesn't require a formal review — a comment or a self-unassign
+# (decline) is also a meaningful first action.
+ASSIGNMENT_RESPONSE_EVENT_TYPES: tuple[str, ...] = (
+    "REVIEW_APPROVED",
+    "REVIEW_COMMENTED",
+    "REVIEW_CHANGES_REQUESTED",
+    "ISSUE_COMMENTED",
+    "UNASSIGNED",
+)
+
 
 def _classify_kind(actor: pl.Expr, counterpart: pl.Expr) -> pl.Expr:
     """Shared kind classifier for ASSIGNED / UNASSIGNED events.
@@ -211,6 +223,117 @@ def review_request_responses(
             "response_gap_seconds",
             "responded",
         )
+    )
+
+
+def assignment_responses(
+    df_events: pl.DataFrame,
+    *,
+    response_event_types: Iterable[str] = ASSIGNMENT_RESPONSE_EVENT_TYPES,
+    bot_actors: Iterable[str] = ASSIGNMENT_BOT_ACTORS,
+) -> pl.DataFrame:
+    """One row per ``ASSIGNED`` event with first action by the assignee.
+
+    Analog of :func:`review_request_responses`: for each ``ASSIGNED``
+    event we look for the earliest event on the same PR whose ``type``
+    is in ``response_event_types`` and whose ``actor_login`` equals the
+    ``ASSIGNED``'s ``assignee_login``. The match must occur at or after
+    the assignment timestamp.
+
+    Default ``response_event_types`` includes ``UNASSIGNED`` because a
+    self-unassign ("decline") is a meaningful response to being
+    assigned; downstream cuts can filter on ``response_event_type`` to
+    distinguish review / comment / decline.
+
+    ``kind`` mirrors :func:`classify_assignment_events`
+    (``"bot"`` / ``"self"`` / ``"other_human"``) so callers can split
+    the latency distribution by how the assignment was made without
+    rejoining the source frame.
+
+    Returns one row per ``ASSIGNED`` event with:
+
+    - ``assignment_event_id`` — the ``id`` column from the event row,
+    - ``pull_request_id``, ``assigned_at``,
+    - ``assigned_by`` (the actor who made the assignment),
+    - ``assignee_login``,
+    - ``kind`` (``bot`` / ``self`` / ``other_human``),
+    - ``responded_at`` (nullable),
+    - ``response_event_type`` (nullable),
+    - ``response_gap_seconds`` — float seconds from assignment to first
+      action, null if no match found,
+    - ``responded`` (bool) — convenience flag.
+    """
+    response_types = list(response_event_types)
+    bots = frozenset(bot_actors)
+
+    assignments = (
+        df_events.filter(pl.col("type") == "ASSIGNED")
+        .select(
+            pl.col("id").alias("assignment_event_id"),
+            pl.col("pull_request_id"),
+            pl.col("occurred_at").alias("assigned_at"),
+            pl.col("actor_login").alias("assigned_by"),
+            pl.col("assignee_login"),
+        )
+        .with_columns(
+            pl.when(pl.col("assigned_by").is_in(bots))
+            .then(pl.lit("bot"))
+            .when(pl.col("assigned_by") == pl.col("assignee_login"))
+            .then(pl.lit("self"))
+            .otherwise(pl.lit("other_human"))
+            .alias("kind"),
+        )
+    )
+
+    null_response_cols = [
+        pl.lit(None, dtype=pl.Datetime("us", "UTC")).alias("responded_at"),
+        pl.lit(None, dtype=pl.Utf8).alias("response_event_type"),
+        pl.lit(None, dtype=pl.Float64).alias("response_gap_seconds"),
+        pl.lit(False, dtype=pl.Boolean).alias("responded"),
+    ]
+
+    if assignments.is_empty():
+        return assignments.with_columns(null_response_cols)
+
+    # Match each ASSIGNED to the earliest event by the same assignee on
+    # the same PR at or after the assignment timestamp. UNASSIGNED is in
+    # the response set, so a self-unassign that follows the assignment
+    # is captured as the "response".
+    responses = df_events.filter(pl.col("type").is_in(response_types)).select(
+        pl.col("pull_request_id"),
+        pl.col("occurred_at").alias("responded_at"),
+        pl.col("actor_login").alias("assignee_login"),
+        pl.col("type").alias("response_event_type"),
+    )
+
+    assignments_sorted = assignments.sort("assigned_at")
+    responses_sorted = responses.sort("responded_at")
+
+    matched = assignments_sorted.join_asof(
+        responses_sorted,
+        left_on="assigned_at",
+        right_on="responded_at",
+        by=["pull_request_id", "assignee_login"],
+        strategy="forward",
+    )
+
+    return matched.with_columns(
+        (pl.col("responded_at") - pl.col("assigned_at"))
+        .dt.total_seconds()
+        .cast(pl.Float64)
+        .alias("response_gap_seconds"),
+        pl.col("responded_at").is_not_null().alias("responded"),
+    ).select(
+        "assignment_event_id",
+        "pull_request_id",
+        "assigned_at",
+        "assigned_by",
+        "assignee_login",
+        "kind",
+        "responded_at",
+        "response_event_type",
+        "response_gap_seconds",
+        "responded",
     )
 
 
