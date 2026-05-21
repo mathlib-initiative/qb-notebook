@@ -72,6 +72,47 @@ In rough priority order (highest leverage / smallest first):
     `syncer_commitstatuscontext` parquets, deliberately punted in
     Theme 3. Which checks fail most, time-to-red→green, failure
     clustering. Larger scope.
+11. **Request / assignment effectiveness** — `ASSIGNED`,
+    `UNASSIGNED`, `REVIEW_REQUESTED`, `REVIEW_REQUEST_REMOVED`
+    events are exported but unused. Two output artifacts:
+    - **`marimo/request_effectiveness.py`** (new) covers:
+      - Review-request conversion rate (fraction of
+        `REVIEW_REQUESTED` events followed by a `REVIEW_*` from
+        the same actor) and latency distribution.
+      - Latency lift on time-to-first-review: within-PR
+        before/after a request (headline), plus a cross-PR cohort
+        comparison matched on size / area / author cohort
+        (robustness).
+      - Request and assignment churn — distributions of
+        `REVIEW_REQUEST_REMOVED` and re-request counts;
+        self-unassign vs other-human-unassign vs bot-unassign
+        (the `mathlib-triage` inactivity automation, recent).
+      - Assignment-policy outcome: did **any** PR assignee end up
+        being the inferred `maintainer-merge` trigger (via
+        `attribute_label_events`)? Stratify by automatic vs
+        manual assignment (actor in `DEFAULT_BOT_ACTORS` vs not),
+        and by maintainer-vs-other for the manual subset.
+      - Top users of manual assignment and of review requests —
+        the "who drives this process" answer.
+    - **Subpopulation responsiveness section in
+      `marimo/reviewer_load.py`** focuses on cohort-level
+      patterns rather than individual identities:
+      maintainer-vs-not, review-volume tier, tenure, area
+      overlap, self-requested vs other-requested. Compares
+      response rate / response latency across cohorts for both
+      review requests and manual assignments. The aim is to
+      identify subpopulations that are systematically more or
+      less responsive, not to rank people.
+
+    Context: a large share of assignments are automated (~65 %
+    of `ASSIGNED` events are from `leanprover-community-bot-assistant`
+    + `mathlib-triage`); review requests are 100 % manual.
+    Assignments carry a policy ("assignee sees PR through to
+    maintainer-merge or closure") that isn't consistently
+    enforced — measuring conformance is part of the point.
+    Automatic unassignment is a recent `mathlib-triage`
+    automation; correlating it with downstream TTM / queue-window
+    behavior is one of the open questions.
 
 ## Stories
 

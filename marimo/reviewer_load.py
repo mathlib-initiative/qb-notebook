@@ -45,6 +45,10 @@ def _():
     import numpy as np
     import polars as pl
 
+    from qb_notebook.assignments import (
+        classify_assignment_events,
+        review_request_responses,
+    )
     from qb_notebook.data_io import load_pr_interval_data
     from qb_notebook.pr_shape import author_cohort, pr_type, size_buckets
     from qb_notebook.review_states import (
@@ -57,6 +61,7 @@ def _():
         Path,
         attribute_label_events,
         author_cohort,
+        classify_assignment_events,
         datetime,
         first_review_touch,
         load_pr_interval_data,
@@ -65,6 +70,7 @@ def _():
         pl,
         plt,
         pr_type,
+        review_request_responses,
         size_buckets,
         timezone,
     )
@@ -885,6 +891,344 @@ def _(first_touch, mo, np, pl):
             cuts_type,
             mo.md("**By `is_first_pr`**"),
             cuts_first,
+        ]
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 6. Subpopulation responsiveness — requests & manual assignments
+
+    Reviewers aren't interchangeable. This section asks whether
+    *cohorts* of reviewers differ systematically in how they respond
+    to review requests and manual assignments. The framing is
+    deliberately about subpopulations, not individuals — we want to
+    spot patterns ("maintainers respond ~3× faster than non-team
+    reviewers on average") rather than rank people.
+
+    A **reviewer profile** is built per login from the signals already
+    in this notebook:
+
+    - **team_bucket** — `maintainer` if the login is in the
+      `maintainers` team, else `reviewer` if in the `reviewers` team,
+      else `other`. Requires the sibling teams checkout — falls back
+      to `unknown` if missing.
+    - **volume_tier** — `top` (≥ p90 of lifetime attributed MM
+      triggers, min 10), `mid` (≥ p50, min 3), `low` (the rest).
+      Reviewers with zero attributed triggers are bucketed as
+      `inactive` and dropped from the cuts.
+    - **tenure_year** — calendar year of the reviewer's first
+      attributed MM trigger; null for reviewers we've never seen
+      trigger MM (typically external folks getting review requests).
+
+    For each axis we look at:
+
+    - **Review-request responsiveness** — fraction of
+      `REVIEW_REQUESTED` events directed at this cohort that drew a
+      same-reviewer `REVIEW_*` response, plus median response latency.
+    - **Manual-assignment follow-through** — for `ASSIGNED` events
+      placed by non-bot actors, fraction where the *assignee* ended
+      up being the attributed `maintainer-merge` trigger. (Bot
+      assignments are excluded; the policy outcome is about whether
+      manually-picked reviewers actually drive the PR through.)
+
+    A **self-vs-other request cut** at the bottom compares requests
+    where the requester equals the reviewer (the reviewer requesting
+    themselves) against the cross-actor majority — a proxy for "do
+    reviewers respond better when they nominated themselves?"
+    """)
+    return
+
+
+@app.cell
+def _(np, pl, signoff_attr, teams):
+    """Per-reviewer profile: team_bucket, volume_tier, tenure_year.
+
+    Built from `signoff_attr` (attributed maintainer-merge triggers)
+    so volume tiers are calibrated on actual review activity rather
+    than arbitrary headcount. Logins are normalised to lowercase to
+    intersect cleanly with the teams sets (which are lowercased)."""
+    _attr = signoff_attr.filter(pl.col("attributed")).with_columns(
+        pl.col("inferred_actor").str.to_lowercase().alias("login")
+    )
+
+    _per_actor = _attr.group_by("login").agg(
+        pl.len().alias("n_signoffs"),
+        pl.col("label_at").min().dt.year().alias("first_signoff_year"),
+    )
+
+    if _per_actor.is_empty():
+        _signoff_counts = np.array([], dtype=float)
+    else:
+        _signoff_counts = _per_actor.get_column("n_signoffs").to_numpy()
+    _p50 = float(np.percentile(_signoff_counts, 50)) if _signoff_counts.size else 0.0
+    _p90 = float(np.percentile(_signoff_counts, 90)) if _signoff_counts.size else 0.0
+
+    _maintainer_set = teams.maintainers if teams is not None else frozenset()
+    _reviewer_set = teams.reviewers if teams is not None else frozenset()
+
+    reviewer_profile = _per_actor.with_columns(
+        pl.when(pl.col("login").is_in(_maintainer_set))
+        .then(pl.lit("maintainer"))
+        .when(pl.col("login").is_in(_reviewer_set))
+        .then(pl.lit("reviewer"))
+        .when(pl.lit(teams is None))
+        .then(pl.lit("unknown"))
+        .otherwise(pl.lit("other"))
+        .alias("team_bucket"),
+        pl.when(pl.col("n_signoffs") >= max(_p90, 10))
+        .then(pl.lit("top"))
+        .when(pl.col("n_signoffs") >= max(_p50, 3))
+        .then(pl.lit("mid"))
+        .otherwise(pl.lit("low"))
+        .alias("volume_tier"),
+        pl.col("first_signoff_year").alias("tenure_year"),
+    )
+    return (reviewer_profile,)
+
+
+@app.cell
+def _(mo, pl, reviewer_profile):
+    """Headline profile breakdown — how many reviewers per cohort?"""
+    _by_team = reviewer_profile.group_by("team_bucket").agg(
+        pl.len().alias("n_reviewers"),
+        pl.col("n_signoffs").sum().alias("total_signoffs"),
+    )
+    _by_volume = reviewer_profile.group_by("volume_tier").agg(
+        pl.len().alias("n_reviewers"),
+        pl.col("n_signoffs").sum().alias("total_signoffs"),
+    )
+    mo.hstack(
+        [
+            mo.vstack([mo.md("**By team**"), _by_team]),
+            mo.vstack([mo.md("**By volume tier**"), _by_volume]),
+        ],
+        gap=1,
+    )
+    return
+
+
+@app.cell
+def _(events, pl, review_request_responses, reviewer_profile):
+    """Per-request response frame joined to the reviewer profile.
+
+    The join key is the lowercased `requested_reviewer_login`. Requests
+    targeted at logins we have no profile for (external folks) get the
+    `team_bucket = "other"`, `volume_tier = "inactive"` defaults so
+    they remain countable as a residual cohort."""
+    _rr = review_request_responses(events).filter(
+        pl.col("requested_reviewer_login").is_not_null()
+    )
+    _rr = _rr.with_columns(
+        pl.col("requested_reviewer_login").str.to_lowercase().alias("login")
+    )
+    request_profile = _rr.join(reviewer_profile, on="login", how="left").with_columns(
+        pl.col("team_bucket").fill_null("other"),
+        pl.col("volume_tier").fill_null("inactive"),
+    )
+    return (request_profile,)
+
+
+@app.cell
+def _(mo, pl, request_profile):
+    """Three responsiveness cuts: team / volume / tenure.
+
+    Each row shows N requests in the cohort, response rate, and
+    median latency for the responded subset. Cohorts with fewer than
+    25 requests are dropped so cuts don't surface noise rows."""
+
+    def _cut(group_col: str, min_n: int = 25):
+        out = (
+            request_profile.group_by(group_col)
+            .agg(
+                pl.len().alias("n_requests"),
+                pl.col("responded").sum().alias("n_responded"),
+                pl.col("response_gap_seconds")
+                .filter(pl.col("responded"))
+                .median()
+                .alias("median_gap_s"),
+                pl.col("response_gap_seconds")
+                .filter(pl.col("responded"))
+                .quantile(0.9)
+                .alias("p90_gap_s"),
+            )
+            .with_columns(
+                (pl.col("n_responded") / pl.col("n_requests"))
+                .round(3)
+                .alias("response_rate"),
+                (pl.col("median_gap_s") / 3600.0).round(1).alias("median_h"),
+                (pl.col("p90_gap_s") / 3600.0).round(1).alias("p90_h"),
+            )
+            .filter(pl.col("n_requests") >= min_n)
+            .drop("median_gap_s", "p90_gap_s")
+            .sort(group_col)
+        )
+        return out
+
+    _by_team = _cut("team_bucket")
+    _by_volume = _cut("volume_tier")
+    _by_tenure = _cut("tenure_year")
+    mo.vstack(
+        [
+            mo.md("### Review-request response rate by reviewer subpopulation"),
+            mo.md("**By team_bucket**"),
+            _by_team,
+            mo.md("**By volume_tier** (calibrated on lifetime attributed sign-offs)"),
+            _by_volume,
+            mo.md(
+                "**By tenure_year** (calendar year of first attributed sign-off). "
+                "Null rows = reviewers we never saw trigger MM."
+            ),
+            _by_tenure,
+        ]
+    )
+    return
+
+
+@app.cell
+def _(mo, pl, request_profile):
+    """Self-requested vs other-requested cut.
+
+    Self-requested events are rare (~1.5% of total) but informative —
+    a reviewer requesting themselves is a strong signal of intent."""
+    _classified = request_profile.with_columns(
+        pl.when(pl.col("requested_by").str.to_lowercase() == pl.col("login"))
+        .then(pl.lit("self"))
+        .otherwise(pl.lit("other"))
+        .alias("requester_kind")
+    )
+    _by_kind = (
+        _classified.group_by(["requester_kind", "team_bucket"])
+        .agg(
+            pl.len().alias("n_requests"),
+            pl.col("responded").sum().alias("n_responded"),
+            pl.col("response_gap_seconds")
+            .filter(pl.col("responded"))
+            .median()
+            .alias("median_gap_s"),
+        )
+        .with_columns(
+            (pl.col("n_responded") / pl.col("n_requests"))
+            .round(3)
+            .alias("response_rate"),
+            (pl.col("median_gap_s") / 3600.0).round(1).alias("median_h"),
+        )
+        .filter(pl.col("n_requests") >= 10)
+        .drop("median_gap_s")
+        .sort(["requester_kind", "team_bucket"])
+    )
+    mo.vstack(
+        [
+            mo.md("### Self-requested vs other-requested"),
+            mo.md(
+                "Cells with fewer than 10 requests are dropped. The `self` rows are "
+                "small but show whether self-nomination correlates with a different "
+                "response profile."
+            ),
+            _by_kind,
+        ]
+    )
+    return
+
+
+@app.cell
+def _(
+    classify_assignment_events,
+    events,
+    pl,
+    reviewer_profile,
+    signoff_attr,
+):
+    """Manual-assignment follow-through by reviewer subpopulation.
+
+    For each manually-applied ASSIGNED event (kind != bot), did the
+    assignee end up being the attributed `maintainer-merge` trigger
+    for that PR? Stratified by the *assignee's* profile, since the
+    policy question is about whether the assigned reviewer drives the
+    PR through.
+
+    A PR can have multiple manual assignments. We treat each
+    (assignee, PR) pair as one observation."""
+    _manual = (
+        classify_assignment_events(events)
+        .filter(pl.col("kind") != "bot")
+        .filter(pl.col("assignee_login").is_not_null())
+        .select("pull_request_id", "assignee_login", "kind")
+        .unique()
+        .with_columns(pl.col("assignee_login").str.to_lowercase().alias("login"))
+    )
+
+    _mm_trigger = (
+        signoff_attr.filter(pl.col("attributed"))
+        .sort("label_at")
+        .group_by("pull_request_id", maintain_order=True)
+        .agg(
+            pl.col("inferred_actor")
+            .first()
+            .str.to_lowercase()
+            .alias("mm_trigger_login")
+        )
+    )
+
+    assignment_followthrough = (
+        _manual.join(_mm_trigger, on="pull_request_id", how="left")
+        .join(reviewer_profile, on="login", how="left")
+        .with_columns(
+            pl.col("team_bucket").fill_null("other"),
+            pl.col("volume_tier").fill_null("inactive"),
+            (pl.col("login") == pl.col("mm_trigger_login"))
+            .fill_null(False)
+            .alias("triggered_mm"),
+        )
+    )
+    return (assignment_followthrough,)
+
+
+@app.cell
+def _(assignment_followthrough, mo, pl):
+    """Manual-assignment follow-through cuts."""
+
+    def _cut(group_col: str, min_n: int = 20):
+        out = (
+            assignment_followthrough.group_by(group_col)
+            .agg(
+                pl.len().alias("n_assignments"),
+                pl.col("triggered_mm").sum().alias("n_followed_through"),
+            )
+            .with_columns(
+                (pl.col("n_followed_through") / pl.col("n_assignments"))
+                .round(3)
+                .alias("followthrough_rate")
+            )
+            .filter(pl.col("n_assignments") >= min_n)
+            .sort(group_col)
+        )
+        return out
+
+    _by_team = _cut("team_bucket")
+    _by_volume = _cut("volume_tier")
+    _by_kind = _cut("kind")
+    mo.vstack(
+        [
+            mo.md(
+                "### Manual-assignment follow-through rate by assignee subpopulation"
+            ),
+            mo.md(
+                "Per (assignee, PR) pair. `followthrough_rate` = fraction "
+                "where the manually-assigned reviewer ended up being the "
+                "attributed MM trigger for that PR."
+            ),
+            mo.md("**By assignee `team_bucket`**"),
+            _by_team,
+            mo.md("**By assignee `volume_tier`**"),
+            _by_volume,
+            mo.md(
+                "**By assignment `kind`** — `self` = the assignee assigned "
+                "themselves; `other_human` = a maintainer or third party did."
+            ),
+            _by_kind,
         ]
     )
     return
