@@ -230,7 +230,7 @@ def _(mo):
     )
 
     show_cycle_branches = mo.ui.checkbox(
-        value=False,
+        value=True,
         label="Sankey: insert sequential queue-cycle nodes after `1 queue cycle`",
     )
     # Shared height for §1 and §1b Sankeys. Plotly Sankey has no
@@ -706,9 +706,9 @@ def _(go, pr_pipeline, sankey_height, show_cycle_branches):
         if row["terminal"] == "merged":
             steps.append("merged")
         elif row["terminal"] == "closed_unmerged":
-            steps.append("closed unmerged")
+            steps.append("closed")
         else:
-            steps.append("still open")
+            steps.append("open")
         return steps
 
     _rows = pr_pipeline.select(
@@ -739,8 +739,8 @@ def _(go, pr_pipeline, sankey_height, show_cycle_branches):
         "bors r+",
         "delegated",
         "merged",
-        "closed unmerged",
-        "still open",
+        "closed",
+        "open",
     ]
     _present_nodes = {n for edge in _edge_counts for n in edge}
     _nodes = [n for n in _node_order if n in _present_nodes]
@@ -761,8 +761,8 @@ def _(go, pr_pipeline, sankey_height, show_cycle_branches):
         "bors r+": "#73a946",
         "delegated": "#9d72c7",
         "merged": "#2c7a2c",
-        "closed unmerged": "#a33",
-        "still open": "#bbb",
+        "closed": "#a33",
+        "open": "#bbb",
     }
 
     # Explicit node positions (x = column, y = vertical) to control
@@ -774,27 +774,27 @@ def _(go, pr_pipeline, sankey_height, show_cycle_branches):
     # can drop below them without crossing.
     _NODE_X = {
         "opened": 0.001,
-        "1 queue cycle": 0.130,
+        "1 queue cycle": 0.124,
         "2 queue cycles": 0.307,
-        "3+ queue cycles": 0.550,
-        "maintainer-merge": 0.636,
-        "bors r+": 0.835,
-        "delegated": 0.835,
+        "3+ queue cycles": 0.499,
+        "maintainer-merge": 0.620,
+        "bors r+": 0.828,
+        "delegated": 0.830,
         "merged": 0.999,
-        "closed unmerged": 0.999,
-        "still open": 0.999,
+        "closed": 0.999,
+        "open": 0.999,
     }
     _NODE_Y = {
         "opened": 0.500,
-        "1 queue cycle": 0.432,
-        "2 queue cycles": 0.466,
-        "3+ queue cycles": 0.509,
-        "maintainer-merge": 0.095,
-        "bors r+": 0.223,
-        "delegated": 0.577,
-        "merged": 0.300,
-        "closed unmerged": 0.720,
-        "still open": 0.950,
+        "1 queue cycle": 0.478,
+        "2 queue cycles": 0.507,
+        "3+ queue cycles": 0.532,
+        "maintainer-merge": 0.085,
+        "bors r+": 0.218,
+        "delegated": 0.567,
+        "merged": 0.310,
+        "closed": 0.735,
+        "open": 0.853,
     }
 
     # Sort links so within each source node, ribbons stack top-to-bottom
@@ -913,9 +913,9 @@ def _(go, pr_pipeline, sankey_height):
         if row["terminal"] == "merged":
             steps.append("merged")
         elif row["terminal"] == "closed_unmerged":
-            steps.append("closed unmerged")
+            steps.append("closed")
         else:
-            steps.append("still open")
+            steps.append("open")
         return steps
 
     _rows = pr_pipeline.select(
@@ -942,51 +942,51 @@ def _(go, pr_pipeline, sankey_height):
         "bors r+",
         "delegated",
         "merged",
-        "closed unmerged",
-        "still open",
+        "closed",
+        "open",
     ]
     _present = {n for edge in _edge_counts for n in edge}
     _nodes = [n for n in _node_order if n in _present]
     _node_idx = {n: i for i, n in enumerate(_nodes)}
 
     _node_colors_map = {
-        "opened": "#888",
-        "1 queue cycle": "#4a90d9",
-        "2 queue cycles": "#6ea7d8",
-        "3+ queue cycles": "#3f7fbe",
-        "maintainer-merge": "#c63",
+        "opened": "#888888",
+        "1 queue cycle": "#9cd4ff",
+        "2 queue cycles": "#489cdb",
+        "3+ queue cycles": "#055999",
+        "maintainer-merge": "#cc6633",
         "bors r+": "#73a946",
         "delegated": "#9d72c7",
         "merged": "#2c7a2c",
-        "closed unmerged": "#a33",
-        "still open": "#bbb",
+        "closed": "#aa3333",
+        "open": "#bbbbbb",
     }
 
     # Explicit node positions (x = column, y = vertical) to control
     # ribbon paths — same layout as §1; see that cell for the rationale.
     _NODE_X = {
         "opened": 0.001,
-        "1 queue cycle": 0.130,
+        "1 queue cycle": 0.124,
         "2 queue cycles": 0.307,
-        "3+ queue cycles": 0.550,
-        "maintainer-merge": 0.636,
-        "bors r+": 0.835,
-        "delegated": 0.835,
+        "3+ queue cycles": 0.499,
+        "maintainer-merge": 0.620,
+        "bors r+": 0.828,
+        "delegated": 0.830,
         "merged": 0.999,
-        "closed unmerged": 0.999,
-        "still open": 0.999,
+        "closed": 0.999,
+        "open": 0.999,
     }
     _NODE_Y = {
         "opened": 0.500,
-        "1 queue cycle": 0.432,
-        "2 queue cycles": 0.466,
-        "3+ queue cycles": 0.509,
-        "maintainer-merge": 0.095,
-        "bors r+": 0.223,
-        "delegated": 0.577,
-        "merged": 0.300,
-        "closed unmerged": 0.720,
-        "still open": 0.950,
+        "1 queue cycle": 0.478,
+        "2 queue cycles": 0.507,
+        "3+ queue cycles": 0.532,
+        "maintainer-merge": 0.085,
+        "bors r+": 0.218,
+        "delegated": 0.567,
+        "merged": 0.310,
+        "closed": 0.735,
+        "open": 0.853,
     }
 
     # Per-link arrays, sorted so ribbons stack top-to-bottom by target y
