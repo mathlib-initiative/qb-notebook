@@ -246,6 +246,9 @@ def _(mo):
     cohort = mo.ui.dropdown(
         options={
             "post-MM (2024-02-15+)": "post_mm",
+            "pre-MM (pre-2024-02-15)": "pre_mm",
+            "pre-bors (pre-2022-08-01)": "pre_bors",
+            "bors → pre-MM (2022-08-01 to 2024-02-15)": "bors_pre_mm",
             "2024 (post-MM)": "2024",
             "2025": "2025",
             "all-time": "all",
@@ -407,6 +410,12 @@ def _(
     empty — that matches the literal "no PRs match" reading."""
     _COHORT_BOUNDS = {
         "post_mm": (datetime(2024, 2, 15, tzinfo=timezone.utc), None),
+        "pre_mm": (None, datetime(2024, 2, 15, tzinfo=timezone.utc)),
+        "pre_bors": (None, datetime(2022, 8, 1, tzinfo=timezone.utc)),
+        "bors_pre_mm": (
+            datetime(2022, 8, 1, tzinfo=timezone.utc),
+            datetime(2024, 2, 15, tzinfo=timezone.utc),
+        ),
         "2024": (
             datetime(2024, 2, 15, tzinfo=timezone.utc),
             datetime(2025, 1, 1, tzinfo=timezone.utc),
