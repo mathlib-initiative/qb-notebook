@@ -6,7 +6,7 @@ __generated_with = "0.23.6"
 app = marimo.App(width="medium")
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _():
     import marimo as mo
 
@@ -62,6 +62,8 @@ def _():
     if str(_repo_root) not in sys.path:
         sys.path.insert(0, str(_repo_root))
 
+    import json
+    import re
     from datetime import datetime, timezone
 
     import matplotlib.pyplot as plt
@@ -71,8 +73,9 @@ def _():
     from scipy.stats import lognorm
 
     import plotly.io as pio
+
     pio.renderers[pio.renderers.default].config = {
-      "toImageButtonOptions": {"format": "png", "scale": 3}
+        "toImageButtonOptions": {"format": "png", "scale": 3}
     }
     # Match the 3× plotly modebar PNG resolution for matplotlib outputs
     # (default dpi is 100). marimo scales the displayed image width
@@ -115,6 +118,7 @@ def _():
         expr_merged_to_master,
         go,
         inline_comment_stats,
+        json,
         label_intervals,
         labels_active_at,
         load_pr_interval_data,
@@ -126,6 +130,7 @@ def _():
         pr_type,
         pr_type_order,
         queue_window_intervals,
+        re,
         size_buckets,
         timezone,
     )
@@ -608,7 +613,7 @@ def _(cohort_label, mo, pl, pr_pipeline):
     def _pct(num: int) -> str:
         return f"{100 * num / max(_n, 1):.1f}%"
 
-    summary = pl.DataFrame(
+    cohort_summary = pl.DataFrame(
         [
             {
                 "milestone": "opened (cohort total)",
@@ -653,11 +658,11 @@ def _(cohort_label, mo, pl, pr_pipeline):
         ]
     )
     mo.md(f"### Cohort `{cohort_label}` — milestone counts")
-    summary
-    return
+    cohort_summary
+    return (cohort_summary,)
 
 
-@app.cell(hide_code=True)
+@app.cell(disabled=True, hide_code=True)
 def _(mo):
     mo.md("""
     ## 1. Lifecycle Sankey
@@ -682,7 +687,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(disabled=True, hide_code=True)
 def _(go, pr_pipeline, sankey_height, show_cycle_branches):
     """Build the Sankey from per-PR path classifications.
 
@@ -909,7 +914,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(go, pr_pipeline, sankey_height):
     """Focus-mode Sankey: reuses §1's edge accumulation but always
     includes cycle nodes and embeds a plotly-native focus dropdown so a
@@ -1190,8 +1195,51 @@ def _(go, pr_pipeline, sankey_height):
     focus_nodes = list(_nodes)
     focus_node_colors = dict(_node_colors_map)
 
+    # Builder for static PNG export — same geometry/colors as the
+    # interactive figure but with a focus baked in as the initial state
+    # and no `updatemenus` (kaleido screenshots respect only the static
+    # config). `focus_node=None` keeps the "All segments" view.
+    def make_focus_sankey_static(focus_node):
+        if focus_node is None:
+            _title = _focuses[0][2]
+        else:
+            _title = next(t for (_, fn, t) in _focuses if fn == focus_node)
+        _fig = go.Figure(
+            data=[
+                go.Sankey(
+                    arrangement="freeform",
+                    node=dict(
+                        label=_node_html_labels,
+                        color=[_node_colors_map.get(n, "#999") for n in _nodes],
+                        x=[_NODE_X[n] for n in _nodes],
+                        y=[_NODE_Y[n] for n in _nodes],
+                        pad=28,
+                        thickness=18,
+                    ),
+                    link=dict(
+                        source=_src,
+                        target=_tgt,
+                        value=_val,
+                        color=_colors_for(focus_node),
+                    ),
+                )
+            ]
+        )
+        _fig.update_layout(
+            title=dict(text=_title, font=dict(color="black")),
+            height=int(sankey_height.value),
+            margin=dict(l=10, r=10, t=60, b=30),
+            font=dict(size=20),
+        )
+        return _fig
+
     sankey_focus_fig
-    return focus_edge_counts, focus_node_colors, focus_nodes
+    return (
+        focus_edge_counts,
+        focus_node_colors,
+        focus_nodes,
+        make_focus_sankey_static,
+    )
 
 
 @app.cell(hide_code=True)
@@ -1293,84 +1341,67 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(breakdown_node, focus_edge_counts, focus_node_colors, mo, plt):
-    """Render incoming + outgoing flow breakdowns for `breakdown_node` as
-    side-by-side horizontal bar charts. Tables are emitted below the
-    figure via `mo.ui.table` (counts + share-of-flow) so the exact
-    numbers are inspectable without squinting at bar tips."""
-    _node = breakdown_node.value
-    _in_edges = sorted(
-        ((a, v) for (a, b), v in focus_edge_counts.items() if b == _node),
-        key=lambda t: -t[1],
-    )
-    _out_edges = sorted(
-        ((b, v) for (a, b), v in focus_edge_counts.items() if a == _node),
-        key=lambda t: -t[1],
-    )
-    _n_in = sum(v for _, v in _in_edges)
-    _n_out = sum(v for _, v in _out_edges)
+def _(breakdown_node, focus_edge_counts, focus_node_colors, plt):
+    """Render the in/out flow breakdown for the selected `breakdown_node`
+    as side-by-side horizontal bar charts. The figure builder is also
+    exported so the save loop in the Export section can render one PNG
+    per node without duplicating the matplotlib code."""
 
-    _fig, _axes = plt.subplots(1, 2, figsize=(10, 3.2))
-    for _ax, _edges, _total, _title in (
-        (_axes[0], _in_edges, _n_in, f"incoming — {_n_in:,} PRs"),
-        (_axes[1], _out_edges, _n_out, f"outgoing — {_n_out:,} PRs"),
-    ):
-        if not _edges:
-            _ax.set_axis_off()
-            _ax.text(0.5, 0.5, "(none)", ha="center", va="center", color="#888")
-            _ax.set_title(_title, fontsize=10)
-            continue
-        _labels = [n for n, _ in _edges]
-        _values = [v for _, v in _edges]
-        _colors = [focus_node_colors.get(n, "#888") for n in _labels]
-        _y = range(len(_labels))
-        _ax.barh(_y, _values, color=_colors, edgecolor="white")
-        _ax.set_yticks(list(_y))
-        _ax.set_yticklabels(_labels)
-        _ax.invert_yaxis()
-        for _i, _v in enumerate(_values):
-            _share = _v / _total if _total else 0
-            _ax.text(
-                _v,
-                _i,
-                f"  {_v:,} ({_share:.0%})",
-                va="center",
-                fontsize=9,
-                color="#333",
-            )
-        _ax.set_title(_title, fontsize=10)
-        _ax.spines["top"].set_visible(False)
-        _ax.spines["right"].set_visible(False)
-        _ax.tick_params(axis="x", labelsize=8)
-        _ax.set_xlim(0, max(_values) * 1.25)
-    _fig.suptitle(f"{_node} — flow breakdown", fontsize=12)
-    _fig.tight_layout()
+    def make_breakdown_fig(node):
+        """Static-export builder: returns a fresh matplotlib Figure for
+        `node`'s in/out flow breakdown. Both the on-screen cell and the
+        save loop go through this so the exported PNGs match the
+        in-notebook view exactly."""
+        in_edges = sorted(
+            ((a, v) for (a, b), v in focus_edge_counts.items() if b == node),
+            key=lambda t: -t[1],
+        )
+        out_edges = sorted(
+            ((b, v) for (a, b), v in focus_edge_counts.items() if a == node),
+            key=lambda t: -t[1],
+        )
+        n_in = sum(v for _, v in in_edges)
+        n_out = sum(v for _, v in out_edges)
 
-    def _table(edges, total):
-        return [
-            {
-                "node": n,
-                "PRs": v,
-                "share": f"{(v / total if total else 0):.1%}",
-            }
-            for n, v in edges
-        ]
+        fig, axes = plt.subplots(1, 2, figsize=(10, 3.2))
+        for ax, edges, total, title in (
+            (axes[0], in_edges, n_in, f"incoming — {n_in:,} PRs"),
+            (axes[1], out_edges, n_out, f"outgoing — {n_out:,} PRs"),
+        ):
+            if not edges:
+                ax.set_axis_off()
+                ax.text(0.5, 0.5, "(none)", ha="center", va="center", color="#888")
+                ax.set_title(title, fontsize=10)
+                continue
+            labels = [n for n, _ in edges]
+            values = [v for _, v in edges]
+            colors = [focus_node_colors.get(n, "#888") for n in labels]
+            y = range(len(labels))
+            ax.barh(y, values, color=colors, edgecolor="white")
+            ax.set_yticks(list(y))
+            ax.set_yticklabels(labels)
+            ax.invert_yaxis()
+            for i, v in enumerate(values):
+                share = v / total if total else 0
+                ax.text(
+                    v,
+                    i,
+                    f"  {v:,} ({share:.0%})",
+                    va="center",
+                    fontsize=9,
+                    color="#333",
+                )
+            ax.set_title(title, fontsize=10)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.tick_params(axis="x", labelsize=8)
+            ax.set_xlim(0, max(values) * 1.25)
+        fig.suptitle(f"{node} — flow breakdown", fontsize=12)
+        fig.tight_layout()
+        return fig
 
-    _in_table = mo.ui.table(
-        _table(_in_edges, _n_in),
-        label="incoming",
-        selection=None,
-    )
-    _out_table = mo.ui.table(
-        _table(_out_edges, _n_out),
-        label="outgoing",
-        selection=None,
-    )
-
-    _fig
-
-    # mo.vstack([_fig, mo.hstack([_in_table, _out_table], widths="equal")])
-    return
+    make_breakdown_fig(breakdown_node.value)
+    return (make_breakdown_fig,)
 
 
 @app.cell(hide_code=True)
@@ -1445,7 +1476,7 @@ def _(lognorm, np, pl, plt, pr_pipeline):
         ax.set_xlabel("duration (days, log scale)")
         ax.set_ylabel("PRs / log bin")
 
-    _fig, _axes = plt.subplots(2, 2, figsize=(13, 8))
+    stage_dist_fig, _axes = plt.subplots(2, 2, figsize=(13, 8))
     for _ax, (_col, _title) in zip(_axes.ravel(), _STAGES):
         _vals = (
             pr_pipeline.filter(pl.col(_col).is_not_null())
@@ -1454,10 +1485,12 @@ def _(lognorm, np, pl, plt, pr_pipeline):
             .to_numpy()
         )
         _draw(_ax, _vals, _title)
-    _fig.suptitle("Per-stage duration distributions (log bins + lognormal fit)")
-    _fig.tight_layout()
-    _fig
-    return
+    stage_dist_fig.suptitle(
+        "Per-stage duration distributions (log bins + lognormal fit)"
+    )
+    stage_dist_fig.tight_layout()
+    stage_dist_fig
+    return (stage_dist_fig,)
 
 
 @app.cell(hide_code=True)
@@ -1508,7 +1541,7 @@ def _(np, pl, plt, pr_pipeline):
 
     stage_medians = pl.DataFrame(_rows)
 
-    _fig, _ax = plt.subplots(figsize=(11, 1.6))
+    stage_share_fig, _ax = plt.subplots(figsize=(11, 1.6))
     _total = sum(_med_days) or 1.0
     _left = 0.0
     for (_label, _col, _color), _val in zip(_STAGE_COLS, _med_days):
@@ -1528,9 +1561,9 @@ def _(np, pl, plt, pr_pipeline):
     _ax.set_yticks([])
     _ax.set_xlabel("Share of summed median stage durations")
     _ax.set_title(f"Stage share of merged-PR TTM (median total: {_total:.2f} days)")
-    _fig.tight_layout()
-    _fig
-    return (stage_medians,)
+    stage_share_fig.tight_layout()
+    stage_share_fig
+    return stage_medians, stage_share_fig
 
 
 @app.cell
@@ -1587,7 +1620,7 @@ def _(np, pl, plt, pr_pipeline):
     _x = _raw_counts.get_column("n_queue_cycles_before_mm").to_numpy()
     _y = _raw_counts.get_column("n_prs").to_numpy()
 
-    _fig, (_ax1, _ax2) = plt.subplots(1, 2, figsize=(13, 4))
+    cycle_count_fig, (_ax1, _ax2) = plt.subplots(1, 2, figsize=(13, 4))
     _ax1.bar(_x, _y, color="#4a90d9", edgecolor="white")
     _ax1.set_xlabel("queue cycles before MM")
     _ax1.set_ylabel("merged PRs")
@@ -1605,9 +1638,9 @@ def _(np, pl, plt, pr_pipeline):
     _ax2.set_ylabel("days (median)")
     _ax2.set_title("TTM and stage-2 latency by cycle bucket")
     _ax2.legend()
-    _fig.tight_layout()
-    _fig
-    return (cycle_table,)
+    cycle_count_fig.tight_layout()
+    cycle_count_fig
+    return cycle_count_fig, cycle_table
 
 
 @app.cell
@@ -1687,20 +1720,22 @@ def _(pl):
 
 @app.cell
 def _(mo, pr_pipeline, pr_type_order, slice_stage_medians):
-    mo.md("**By PR type:**")
-    slice_stage_medians(
+    slice_by_pr_type = slice_stage_medians(
         pr_pipeline, slice_col="pr_type", slice_order=list(pr_type_order())
     )
-    return
+    mo.md("**By PR type:**")
+    slice_by_pr_type
+    return (slice_by_pr_type,)
 
 
 @app.cell
 def _(lines_bucket_order, mo, pr_pipeline, slice_stage_medians):
-    mo.md("**By lines bucket:**")
-    slice_stage_medians(
+    slice_by_lines_bucket = slice_stage_medians(
         pr_pipeline, slice_col="lines_bucket", slice_order=lines_bucket_order
     )
-    return
+    mo.md("**By lines bucket:**")
+    slice_by_lines_bucket
+    return (slice_by_lines_bucket,)
 
 
 @app.cell
@@ -1719,14 +1754,14 @@ def _(mo, pl, pr_pipeline, pr_topic_one, slice_stage_medians):
         .get_column("topic_area")
         .to_list()
     )
-    topic_table = slice_stage_medians(
+    slice_by_topic_area = slice_stage_medians(
         _enriched.filter(pl.col("topic_area").is_in(_top_areas)),
         slice_col="topic_area",
         slice_order=_top_areas,
     )
     mo.md("**By topic area (top 10 by merged-PR count):**")
-    topic_table
-    return
+    slice_by_topic_area
+    return (slice_by_topic_area,)
 
 
 @app.cell
@@ -1740,13 +1775,14 @@ def _(mo, pl, pr_pipeline, slice_stage_medians):
         .otherwise(pl.lit("returning"))
         .alias("author_cohort_label")
     )
-    mo.md("**By author cohort:**")
-    slice_stage_medians(
+    slice_by_author_cohort = slice_stage_medians(
         _df,
         slice_col="author_cohort_label",
         slice_order=["first PR", "returning"],
     )
-    return
+    mo.md("**By author cohort:**")
+    slice_by_author_cohort
+    return (slice_by_author_cohort,)
 
 
 @app.cell
@@ -1850,7 +1886,7 @@ def _(inline_counts, np, pl, plt, pr_pipeline, review_counts):
         ("n_inline_comments_by_others", "inline comments-by-others"),
     ]
 
-    _fig, _axes = plt.subplots(1, 3, figsize=(15, 4))
+    review_activity_fig, _axes = plt.subplots(1, 3, figsize=(15, 4))
     for _ax, (_col, _title) in zip(_axes, _SIGNALS):
         _vals = _merged.get_column(_col).to_numpy()
         _x = 1.0 + _vals.astype(float)  # log-binnable
@@ -1865,9 +1901,9 @@ def _(inline_counts, np, pl, plt, pr_pipeline, review_counts):
             f"%zero={100 * (_vals == 0).mean():.0f}%"
         )
     _axes[0].set_ylabel("merged PRs")
-    _fig.tight_layout()
-    _fig
-    return
+    review_activity_fig.tight_layout()
+    review_activity_fig
+    return (review_activity_fig,)
 
 
 @app.cell
@@ -1913,7 +1949,7 @@ def _(mo, np, pl, pr_pipeline):
     _ = np  # quiet the linter — kept available for future ad-hoc additions
     mo.md("**Path counts and TTM medians (merged PRs only):**")
     path_table
-    return
+    return (path_table,)
 
 
 @app.cell
@@ -1942,6 +1978,202 @@ def _(mo):
       is deferred to Story B (latency decomposition). Here we surface
       only queue-cycle *count* as the queue-aware signal.
     """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## Export
+
+    Pick a base folder (server-side, on the machine running marimo),
+    name the run, then click **Save outputs**. Files land in
+    `<base>/<run name>/`:
+
+    - `1b__<focus>.png` — one image per focus-dropdown state of §1b
+      (kaleido is required for the Sankey PNG; if it fails the cell
+      falls back to a self-contained HTML).
+    - `1c__<node>.png` — one image per breakdown node of §1c.
+    - `2_per-stage-distributions.png`, `3_stage-share.png`,
+      `4_queue-cycles.png`, `6_review-activity.png` — current state of
+      the §2/§3/§4/§6 plots.
+    - `cohort_summary.csv`, `3_stage_medians.csv`, `4_cycle_table.csv`,
+      `5_slice_by_*.csv`, `7_path_table.csv` — supporting tables.
+    - `settings.json` — cohort + filter state at save time.
+
+    The save loop honours whatever filters / cohort / sankey-height you
+    have set above, so iterating on a scenario is: adjust filters →
+    type a new run name → click Save.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(Path, mo):
+    """Picker UI: a server-side folder browser, a run-name text input,
+    and the Save button. `restrict_navigation=False` so the picker can
+    point anywhere on disk; `_site/exports/` (under the repo root) is
+    the default starting directory because it's already gitignored."""
+    _repo_root = Path(__file__).resolve().parents[1]
+    _default_base = _repo_root / "_site" / "exports"
+    _default_base.mkdir(parents=True, exist_ok=True)
+    save_dir_picker = mo.ui.file_browser(
+        initial_path=_default_base,
+        selection_mode="directory",
+        multiple=False,
+        restrict_navigation=False,
+        label="Base folder (pick one directory)",
+    )
+    save_run_name = mo.ui.text(
+        value="run",
+        label="Run name (subfolder)",
+        placeholder="e.g. post-mm-default",
+        full_width=False,
+    )
+    save_btn = mo.ui.run_button(label="Save outputs", kind="success")
+    mo.vstack([save_dir_picker, save_run_name, save_btn])
+    return save_btn, save_dir_picker, save_run_name
+
+
+@app.cell(hide_code=True)
+def _(
+    available_pr_types,
+    available_topics,
+    cohort,
+    cohort_summary,
+    cycle_count_fig,
+    cycle_table,
+    focus_nodes,
+    json,
+    make_breakdown_fig,
+    make_focus_sankey_static,
+    mo,
+    path_table,
+    plt,
+    pr_type_checks,
+    re,
+    review_activity_fig,
+    sankey_height,
+    save_btn,
+    save_dir_picker,
+    save_run_name,
+    show_cycle_branches,
+    slice_by_author_cohort,
+    slice_by_lines_bucket,
+    slice_by_pr_type,
+    slice_by_topic_area,
+    stage_dist_fig,
+    stage_medians,
+    stage_share_fig,
+    topic_checks,
+):
+    """Write all selected outputs to `<base>/<name>/` when the Save
+    button is clicked. The cell short-circuits via `mo.stop` while the
+    button is idle, so it costs nothing on every other re-render.
+
+    Plotly → PNG goes through kaleido (Chromium-backed). If that fails
+    on this machine — kaleido not installed, no Chrome available, etc.
+    — the Sankey falls back to self-contained HTML so the export still
+    completes."""
+    mo.stop(
+        not save_btn.value,
+        mo.md("_Pick a base folder, name the run, then click **Save outputs**._"),
+    )
+
+    _entries = save_dir_picker.value
+    mo.stop(not _entries, mo.md("**Pick a base folder first.**"))
+    _base = save_dir_picker.path(index=0)
+    _name = (save_run_name.value or "run").strip() or "run"
+    _out = _base / _name
+    _out.mkdir(parents=True, exist_ok=True)
+
+    def _slug(s):
+        return re.sub(r"[^a-zA-Z0-9]+", "-", s).strip("-").lower() or "untitled"
+
+    _written = []
+    _errors = []
+
+    def _save_plotly(fig, name):
+        png_path = _out / f"{name}.png"
+        try:
+            fig.write_image(
+                str(png_path),
+                width=1400,
+                height=int(sankey_height.value) + 40,
+                scale=2,
+            )
+            _written.append(png_path.name)
+        except Exception as e:
+            # kaleido / Chrome unavailable — write a self-contained HTML
+            # so each focus state is still preserved as a distinct file.
+            html_path = _out / f"{name}.html"
+            fig.write_html(str(html_path), include_plotlyjs="cdn")
+            _written.append(f"{html_path.name}  (PNG failed: {type(e).__name__})")
+            _errors.append((name, repr(e)))
+
+    def _save_mpl(fig, name):
+        png_path = _out / f"{name}.png"
+        fig.savefig(png_path, dpi=200, bbox_inches="tight")
+        _written.append(png_path.name)
+
+    # §1b: one figure per focus-dropdown state (None = "All segments")
+    for _fn in [None] + focus_nodes:
+        _label = "all-segments" if _fn is None else _slug(_fn)
+        _save_plotly(make_focus_sankey_static(_fn), f"1b__{_label}")
+
+    # §1c: one figure per breakdown node
+    for _node in focus_nodes:
+        _fig = make_breakdown_fig(_node)
+        _save_mpl(_fig, f"1c__{_slug(_node)}")
+        plt.close(_fig)
+
+    # §2 / §3 / §4 / §6 — already built; just dump current state
+    _save_mpl(stage_dist_fig, "2_per-stage-distributions")
+    _save_mpl(stage_share_fig, "3_stage-share")
+    _save_mpl(cycle_count_fig, "4_queue-cycles")
+    _save_mpl(review_activity_fig, "6_review-activity")
+
+    # Tables → CSV
+    for _csv_name, _df in (
+        ("cohort_summary", cohort_summary),
+        ("3_stage_medians", stage_medians),
+        ("4_cycle_table", cycle_table),
+        ("5_slice_by_pr_type", slice_by_pr_type),
+        ("5_slice_by_lines_bucket", slice_by_lines_bucket),
+        ("5_slice_by_topic_area", slice_by_topic_area),
+        ("5_slice_by_author_cohort", slice_by_author_cohort),
+        ("7_path_table", path_table),
+    ):
+        _path = _out / f"{_csv_name}.csv"
+        _df.write_csv(_path)
+        _written.append(_path.name)
+
+    # settings.json — enough to reproduce the cohort exactly
+    _settings = {
+        "cohort": cohort.value,
+        "show_cycle_branches": bool(show_cycle_branches.value),
+        "sankey_height": int(sankey_height.value),
+        "topics_selected": [
+            t for t, v in zip(available_topics, topic_checks.value) if v
+        ],
+        "pr_types_selected": [
+            t for t, v in zip(available_pr_types, pr_type_checks.value) if v
+        ],
+    }
+    (_out / "settings.json").write_text(json.dumps(_settings, indent=2))
+    _written.append("settings.json")
+
+    _err_block = ""
+    if _errors:
+        _err_block = "\n\n**Warnings:**\n" + "\n".join(
+            f"- `{n}`: {msg}" for n, msg in _errors
+        )
+
+    mo.md(
+        f"### Wrote {len(_written)} files to `{_out}`\n\n"
+        + "\n".join(f"- `{f}`" for f in _written)
+        + _err_block
+    )
     return
 
 
