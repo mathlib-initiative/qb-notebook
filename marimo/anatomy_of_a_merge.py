@@ -813,6 +813,31 @@ def _(go, pr_pipeline, sankey_height, show_cycle_branches):
     _tgt = [_tgt[i] for i in _link_order]
     _val = [_val[i] for i in _link_order]
 
+    # Tint each node label to match its segment color and give it a
+    # per-node SVG outline (dark for light segments, light for dark).
+    # Plotly passes the span `style` attribute through to the SVG
+    # `<tspan>` as-is (rewriting `color:` to `fill:`), so SVG-native
+    # `stroke` + `paint-order:stroke fill` reliably produces a halo
+    # behind the glyphs — `text-shadow` on SVG tspans is ignored by
+    # most browsers, and the trace-level `textfont.shadow` is a single
+    # value (no per-node array), so neither of those options work here.
+    def _halo_color(bg_hex: str) -> str:
+        h = bg_hex.lstrip("#")
+        if len(h) == 3:
+            h = "".join(c * 2 for c in h)
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+        return "black" if luminance > 0.55 else "white"
+
+    _node_html_labels = []
+    for _n in _nodes:
+        _c = _node_colors.get(_n, "#999")
+        _halo = _halo_color(_c)
+        _node_html_labels.append(
+            f'<span style="color:{_c};stroke:{_halo};stroke-width:4;'
+            f'paint-order:stroke fill">{_n}</span>'
+        )
+
     sankey_fig = go.Figure(
         data=[
             go.Sankey(
@@ -822,7 +847,7 @@ def _(go, pr_pipeline, sankey_height, show_cycle_branches):
                 # room to hand-tune label overlaps in the cycle column.
                 arrangement="freeform",
                 node=dict(
-                    label=_nodes,
+                    label=_node_html_labels,
                     color=[_node_colors.get(n, "#999") for n in _nodes],
                     x=[_NODE_X[n] for n in _nodes],
                     y=[_NODE_Y[n] for n in _nodes],
@@ -834,8 +859,11 @@ def _(go, pr_pipeline, sankey_height, show_cycle_branches):
         ]
     )
     sankey_fig.update_layout(
-        title="Lifecycle flow — counts of PRs traversing each segment",
-        font=dict(size=12, color="#A00"),
+        title=dict(
+            text="mathlib4 PR lifecycle flow (2024-02-15 to 2026-05-21)",
+            font=dict(color="black"),
+        ),
+        font=dict(size=20),
         height=int(sankey_height.value),
         margin=dict(l=10, r=10, t=60, b=20),
     )
@@ -1052,12 +1080,40 @@ def _(go, pr_pipeline, sankey_height):
                 out.append(_DIM)
         return out
 
+    # Tint each node label to match its segment color and give it a
+    # per-node SVG outline (dark for light segments, light for dark).
+    # Plotly passes the span `style` attribute through to the SVG
+    # `<tspan>` as-is (rewriting `color:` to `fill:`), so SVG-native
+    # `stroke` + `paint-order:stroke fill` reliably produces a halo
+    # behind the glyphs — `text-shadow` on SVG tspans is ignored by
+    # most browsers, and the trace-level `textfont.shadow` is a single
+    # value (no per-node array), so neither of those options work here.
+    # The dark halo uses `#333` and a thinner stroke than the light
+    # halo, since pure-black at the same width visually weighs each
+    # letter down ("stencil effect") and makes labels read as crowded.
+    def _halo_color(bg_hex: str) -> str:
+        h = bg_hex.lstrip("#")
+        if len(h) == 3:
+            h = "".join(c * 2 for c in h)
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+        return "#333" if luminance > 0.55 else "white"
+
+    _node_html_labels = []
+    for _n in _nodes:
+        _c = _node_colors_map.get(_n, "#999")
+        _halo = _halo_color(_c)
+        _node_html_labels.append(
+            f'<span style="color:{_c};stroke:{_halo};stroke-width:{2 if _halo == "#333" else 5};'
+            f'paint-order:stroke fill">{_n}</span>'
+        )
+
     sankey_focus_fig = go.Figure(
         data=[
             go.Sankey(
                 arrangement="freeform",
                 node=dict(
-                    label=_nodes,
+                    label=_node_html_labels,
                     color=[_node_colors_map.get(n, "#999") for n in _nodes],
                     x=[_NODE_X[n] for n in _nodes],
                     y=[_NODE_Y[n] for n in _nodes],
@@ -1090,7 +1146,7 @@ def _(go, pr_pipeline, sankey_height):
     ]
 
     sankey_focus_fig.update_layout(
-        title=_focuses[0][2],
+        title=dict(text=_focuses[0][2], font=dict(color="black")),
         updatemenus=[
             dict(
                 buttons=_buttons,
@@ -1107,7 +1163,7 @@ def _(go, pr_pipeline, sankey_height):
         ],
         height=int(sankey_height.value),
         margin=dict(l=10, r=10, t=60, b=70),
-        font=dict(size=12, color="#A00"),
+        font=dict(size=20),
     )
 
     # Exported for §1c (downstream breakdown cell). Copied out of the
