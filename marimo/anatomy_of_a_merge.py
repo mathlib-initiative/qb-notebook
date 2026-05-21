@@ -1429,15 +1429,16 @@ def _(mo):
     view. A lognormal fit (`scipy.stats.lognorm` with `floc=0`) is
     overlaid on each panel.
 
-    **The `first review → MM` panel is bimodal.** ~45 % of post-MM PRs
-    are *maintainer-first*: the very first non-author / non-bot event is
-    itself the sign-off (a `REVIEW_APPROVED`, or an `ISSUE_COMMENTED`
+    **The `first review → MM` panel is filtered to the iterated regime
+    (≥ 60 s).** Stage 2 is bimodal: ~45 % of post-MM PRs are
+    *maintainer-first*, where the very first non-author / non-bot event
+    is itself the sign-off (a `REVIEW_APPROVED`, or an `ISSUE_COMMENTED`
     carrying the `maintainer merge` trigger phrase), so the
     `github-actions` bot applies the label within ~10–20 s and stage 2
-    collapses to the bot-latency floor. The other ~55 % go through one
-    or more real review cycles before MM. The two regimes are overlaid
-    in different colors (split at 60 s); the lognormal fit is run on
-    the iterated regime only so the floor spike doesn't distort it.
+    collapses to the bot-latency floor. To keep this panel readable as
+    "actual review-cycle duration before sign-off", maintainer-first
+    PRs are excluded here; §2b restores the full distribution and
+    surfaces the maintainer-first regime on its own.
     """)
     return
 
@@ -1445,18 +1446,16 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(lognorm, np, pl, plt, pr_pipeline):
     """4-panel log-binned histogram + lognormal fit, one panel per stage.
-    The `first review → MM` panel is special-cased: stage 2 is bimodal
-    (maintainer-first vs iterated) so the two regimes are overlaid in
-    different colors and the lognormal fit uses only the iterated tail
-    so the bot-latency spike doesn't pull the fit. Returns the figure
-    as the cell output."""
-    _SPLIT_S2_SECONDS = 60.0  # bot-latency floor cutoff for stage 2
+    Stage 2 (`first review → MM`) is filtered to the iterated regime
+    (≥ 60 s) so the bot-latency-bounded maintainer-first PRs don't
+    flatten the panel; see §2b for the full bimodal distribution."""
+    _MIN_S2_SECONDS = 60.0  # exclude maintainer-first (bot-latency floor)
     _STAGES = [
         ("seconds_open_to_first_touch", "open → first review", None),
         (
             "seconds_first_touch_to_maintainer_merge",
-            "first review → maintainer-merge",
-            _SPLIT_S2_SECONDS / 86400.0,
+            "first review → maintainer-merge (iterated, ≥ 60 s)",
+            _MIN_S2_SECONDS,
         ),
         (
             "seconds_maintainer_merge_to_ready_to_merge",
@@ -1466,14 +1465,7 @@ def _(lognorm, np, pl, plt, pr_pipeline):
         ("seconds_ready_to_merge_to_merged", "RTM → merged", None),
     ]
 
-    def _draw(
-        ax,
-        x_days: np.ndarray,
-        title: str,
-        *,
-        split_at: float | None = None,
-        bins: int = 60,
-    ) -> None:
+    def _draw(ax, x_days: np.ndarray, title: str, *, bins: int = 60) -> None:
         x = x_days[x_days > 0]
         if x.size < 5:
             ax.set_title(f"{title} (n={x.size}, insufficient)")
@@ -1483,52 +1475,24 @@ def _(lognorm, np, pl, plt, pr_pipeline):
         hi = x.max()
         edges = np.logspace(np.log10(lo), np.log10(hi), bins + 1)
         centers = np.sqrt(edges[:-1] * edges[1:])
-        if split_at is not None:
-            x_fast = x[x < split_at]
-            x_slow = x[x >= split_at]
-            for arr, color, label in [
-                (
-                    x_fast,
-                    "#bd7eb6",
-                    f"first review = sign-off "
-                    f"(n={x_fast.size}, {100 * x_fast.size / x.size:.0f}%)",
-                ),
-                (
-                    x_slow,
-                    "#4a90d9",
-                    f"iterated "
-                    f"(n={x_slow.size}, {100 * x_slow.size / x.size:.0f}%)",
-                ),
-            ]:
-                if arr.size > 0:
-                    counts, _ = np.histogram(arr, bins=edges)
-                    y_step = np.r_[counts, counts[-1]]
-                    ax.step(
-                        edges, y_step, where="post", linewidth=1.2, color=color, label=label
-                    )
-            ax.axvline(split_at, color="#888", linestyle=":", linewidth=0.8)
-            fit_x = x_slow
-        else:
-            counts, _ = np.histogram(x, bins=edges)
-            y_step = np.r_[counts, counts[-1]]
-            ax.step(edges, y_step, where="post", linewidth=1.2, color="#4a90d9")
-            fit_x = x
+        counts, _ = np.histogram(x, bins=edges)
+        y_step = np.r_[counts, counts[-1]]
+        ax.step(edges, y_step, where="post", linewidth=1.2, color="#4a90d9")
         try:
-            if fit_x.size >= 5:
-                sigma, _loc, scale = lognorm.fit(fit_x, floc=0)
-                mu = np.log(scale)
-                cdf = lognorm.cdf(edges, s=sigma, loc=0, scale=scale)
-                expected = fit_x.size * np.diff(cdf)
-                ax.plot(
-                    centers,
-                    expected,
-                    color="#c63",
-                    linewidth=2.0,
-                    label=f"lognormal μ={mu:.2f}, σ={sigma:.2f}",
-                )
+            sigma, _loc, scale = lognorm.fit(x, floc=0)
+            mu = np.log(scale)
+            cdf = lognorm.cdf(edges, s=sigma, loc=0, scale=scale)
+            expected = x.size * np.diff(cdf)
+            ax.plot(
+                centers,
+                expected,
+                color="#c63",
+                linewidth=2.0,
+                label=f"lognormal μ={mu:.2f}, σ={sigma:.2f}",
+            )
+            ax.legend(fontsize=8)
         except Exception:  # pragma: no cover — defensive on small samples
             pass
-        ax.legend(fontsize=7)
         med = float(np.median(x))
         p90 = float(np.percentile(x, 90))
         ax.axvline(med, color="#444", linestyle="--", linewidth=0.8)
@@ -1538,14 +1502,16 @@ def _(lognorm, np, pl, plt, pr_pipeline):
         ax.set_ylabel("PRs / log bin")
 
     stage_dist_fig, _axes = plt.subplots(2, 2, figsize=(13, 8))
-    for _ax, (_col, _title, _split) in zip(_axes.ravel(), _STAGES):
+    for _ax, (_col, _title, _min_seconds) in zip(_axes.ravel(), _STAGES):
         _vals = (
             pr_pipeline.filter(pl.col(_col).is_not_null())
             .select((pl.col(_col) / 86400.0).alias("days"))
             .get_column("days")
             .to_numpy()
         )
-        _draw(_ax, _vals, _title, split_at=_split)
+        if _min_seconds is not None:
+            _vals = _vals[_vals >= (_min_seconds / 86400.0)]
+        _draw(_ax, _vals, _title)
     stage_dist_fig.suptitle(
         "Per-stage duration distributions (log bins + lognormal fit)"
     )
@@ -1557,23 +1523,24 @@ def _(lognorm, np, pl, plt, pr_pipeline):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ### 2b. `first review → MM` regimes, side-by-side
+    ### 2b. `first review → MM` — full bimodal distribution
 
-    Same stage as the bottom-left panel above, but with each regime
-    plotted on its own axis. The **maintainer-first** panel is
-    essentially the `github-actions` bot-latency distribution: the
-    maintainer's approval or `maintainer merge` comment triggers MM in
-    ~10–20 s. The **iterated** panel is what stage 2 looks like once
-    the bot-latency floor is removed — i.e., the actual review-cycle
-    duration before sign-off. A lognormal fit is overlaid on the
-    iterated panel only.
+    The §2 stage-2 panel is filtered to the iterated regime so the
+    lognormal fit isn't distorted by the bot-latency floor. The two
+    panels below restore the full picture:
+    - **Left:** maintainer-first PRs only (< 60 s) — essentially the
+      `github-actions` bot-latency distribution. A maintainer's
+      approval or `maintainer merge` comment triggers MM in ~10–20 s.
+    - **Right:** both regimes overlaid on a single axis with the split
+      line at 60 s, showing the bimodality at a glance. The lognormal
+      fit is run on the iterated tail only.
     """)
     return
 
 
 @app.cell(hide_code=True)
 def _(lognorm, np, pl, plt, pr_pipeline):
-    """Side-by-side stage-2 split: maintainer-first vs iterated."""
+    """Side-by-side stage-2 panels: maintainer-first only + bimodal overlay."""
     _SPLIT_S2_DAYS = 60.0 / 86400.0
     _vals = (
         pr_pipeline.filter(
@@ -1589,55 +1556,90 @@ def _(lognorm, np, pl, plt, pr_pipeline):
     _fast = _vals[_vals < _SPLIT_S2_DAYS]
     _slow = _vals[_vals >= _SPLIT_S2_DAYS]
 
-    def _panel(
-        ax, arr, title, color, *, fit: bool, unit: str = "d", bins: int = 60
-    ) -> None:
+    def _maintainer_first(ax, arr, *, bins: int = 60) -> None:
         if arr.size < 5:
-            ax.set_title(f"{title} (n={arr.size}, insufficient)")
+            ax.set_title(f"maintainer-first (n={arr.size}, insufficient)")
             ax.set_xscale("log")
             return
         lo = max(arr.min(), np.nextafter(0, 1))
         hi = arr.max()
         edges = np.logspace(np.log10(lo), np.log10(hi), bins + 1)
-        centers = np.sqrt(edges[:-1] * edges[1:])
         counts, _ = np.histogram(arr, bins=edges)
         y_step = np.r_[counts, counts[-1]]
-        ax.step(edges, y_step, where="post", linewidth=1.2, color=color)
-        if fit:
-            try:
-                sigma, _loc, scale = lognorm.fit(arr, floc=0)
+        ax.step(edges, y_step, where="post", linewidth=1.2, color="#bd7eb6")
+        med = float(np.median(arr))
+        p90 = float(np.percentile(arr, 90))
+        ax.axvline(med, color="#444", linestyle="--", linewidth=0.8)
+        ax.set_xscale("log")
+        ax.set_title(
+            f"maintainer-first (< 60 s)\n"
+            f"n={arr.size} ({100 * arr.size / _vals.size:.1f}%), "
+            f"median={med * 86400:.0f}s, p90={p90 * 86400:.0f}s"
+        )
+        ax.set_xlabel("duration (days, log scale)")
+        ax.set_ylabel("PRs / log bin")
+
+    def _overlay(ax, fast, slow, *, bins: int = 60) -> None:
+        x = np.concatenate([fast, slow])
+        if x.size < 5:
+            ax.set_title(f"overlay (n={x.size}, insufficient)")
+            ax.set_xscale("log")
+            return
+        lo = max(x.min(), np.nextafter(0, 1))
+        hi = x.max()
+        edges = np.logspace(np.log10(lo), np.log10(hi), bins + 1)
+        centers = np.sqrt(edges[:-1] * edges[1:])
+        for arr, color, label in [
+            (
+                fast,
+                "#bd7eb6",
+                f"maintainer-first (n={fast.size}, {100 * fast.size / x.size:.0f}%)",
+            ),
+            (
+                slow,
+                "#4a90d9",
+                f"iterated (n={slow.size}, {100 * slow.size / x.size:.0f}%)",
+            ),
+        ]:
+            if arr.size > 0:
+                counts, _ = np.histogram(arr, bins=edges)
+                y_step = np.r_[counts, counts[-1]]
+                ax.step(
+                    edges, y_step, where="post", linewidth=1.2, color=color, label=label
+                )
+        ax.axvline(_SPLIT_S2_DAYS, color="#888", linestyle=":", linewidth=0.8)
+        try:
+            if slow.size >= 5:
+                sigma, _loc, scale = lognorm.fit(slow, floc=0)
                 mu = np.log(scale)
                 cdf = lognorm.cdf(edges, s=sigma, loc=0, scale=scale)
-                expected = arr.size * np.diff(cdf)
+                expected = slow.size * np.diff(cdf)
                 ax.plot(
                     centers,
                     expected,
                     color="#c63",
                     linewidth=2.0,
-                    label=f"lognormal μ={mu:.2f}, σ={sigma:.2f}",
+                    label=f"lognormal (iterated) μ={mu:.2f}, σ={sigma:.2f}",
                 )
-                ax.legend(fontsize=8)
-            except Exception:
-                pass
-        med = float(np.median(arr))
-        p90 = float(np.percentile(arr, 90))
+        except Exception:
+            pass
+        ax.legend(fontsize=7)
+        med = float(np.median(x))
+        p90 = float(np.percentile(x, 90))
         ax.axvline(med, color="#444", linestyle="--", linewidth=0.8)
         ax.set_xscale("log")
-        if unit == "s":
-            _stat = f"median={med * 86400:.0f}s, p90={p90 * 86400:.0f}s"
-        else:
-            _stat = f"median={med:.2f}d, p90={p90:.2f}d"
         ax.set_title(
-            f"{title}\nn={arr.size} ({100 * arr.size / _vals.size:.1f}%), {_stat}"
+            f"both regimes (split at 60 s)\n"
+            f"n={x.size}, median={med:.2f}d, p90={p90:.2f}d"
         )
         ax.set_xlabel("duration (days, log scale)")
         ax.set_ylabel("PRs / log bin")
 
     stage2_split_fig, _axes = plt.subplots(1, 2, figsize=(13, 4))
-    _panel(_axes[0], _fast, "maintainer-first (< 60 s)", "#bd7eb6", fit=False, unit="s")
-    _panel(_axes[1], _slow, "iterated (≥ 60 s)", "#4a90d9", fit=True, unit="d")
+    _maintainer_first(_axes[0], _fast)
+    _overlay(_axes[1], _fast, _slow)
     stage2_split_fig.suptitle(
-        "Stage 2 (first review → maintainer-merge) — regimes side-by-side"
+        "Stage 2 (first review → maintainer-merge) — full bimodal distribution"
     )
     stage2_split_fig.tight_layout()
     stage2_split_fig
@@ -1772,6 +1774,23 @@ def _(mo):
     that never reached MM contribute their full cycle count. The
     distribution is heavily skewed — most merged PRs reach MM in one
     queue cycle.
+
+    The left panel uses a log Y axis and overlays a shifted-geometric
+    MLE fit on support `k ≥ 1` (each cycle has an independent
+    probability `q` of being the last before MM). A clean geometric
+    would be a straight line on log Y; deviations show where the "each
+    cycle independently signs off" model breaks down. Bin 0 (PRs that
+    reached MM with no prior queue window) is excluded from the fit —
+    it's a small, separate population.
+
+    The right panel plots median TTM and median stage-2 latency
+    against `n_queue_cycles_before_mm` (one point per bucket with at
+    least 30 PRs, IQR error bars), with a linear OLS fit overlaid.
+    Under a "each cycle adds roughly a constant marginal duration"
+    model the points fall on a line; the slope reads as
+    days-per-extra-cycle. A downturn or non-monotonicity at high `n`
+    is suggestive of survivor effects (PRs that survive many cycles
+    tend to have shorter touch-up rounds).
     """)
     return
 
@@ -1810,22 +1829,128 @@ def _(np, pl, plt, pr_pipeline):
 
     cycle_count_fig, (_ax1, _ax2) = plt.subplots(1, 2, figsize=(13, 4))
     _ax1.bar(_x, _y, color="#4a90d9", edgecolor="white")
+    # Shifted-geometric MLE on support {1, 2, ...}: P(k) = (1-q)^(k-1) q,
+    # mean = 1/q. Bin 0 (PRs that reached MM with no prior queue window)
+    # is a small separate population — fit on bins ≥ 1 only. On log Y a
+    # shifted geometric is a straight line with slope log(1 - q).
+    _mask = _x >= 1
+    _x_pos, _y_pos = _x[_mask], _y[_mask]
+    if _y_pos.sum() > 0:
+        _mean_pos = float(np.average(_x_pos, weights=_y_pos))
+        _q = 1.0 / _mean_pos if _mean_pos > 0 else 1.0
+        _xx = np.arange(1, int(_x.max()) + 1)
+        _expected = _y_pos.sum() * (1 - _q) ** (_xx - 1) * _q
+        _ax1.plot(
+            _xx,
+            _expected,
+            color="#c63",
+            marker="o",
+            markersize=4,
+            linewidth=1.5,
+            label=f"geometric MLE on k≥1: q={_q:.3f}, mean={_mean_pos:.2f}",
+        )
+        _ax1.legend(fontsize=8)
+    _ax1.set_yscale("log")
     _ax1.set_xlabel("queue cycles before MM")
-    _ax1.set_ylabel("merged PRs")
-    _ax1.set_title("Cycle count distribution (merged)")
+    _ax1.set_ylabel("merged PRs (log scale)")
+    _ax1.set_title("Cycle count distribution (merged, log Y)")
 
-    _bucket_x = cycle_table.get_column("cycle_bucket").to_list()
-    _ttm = cycle_table.get_column("median_ttm_days").to_numpy()
-    _s2 = cycle_table.get_column("median_stage2_days").to_numpy()
-    _xs = np.arange(len(_bucket_x))
-    _ax2.bar(_xs - 0.2, _ttm, width=0.4, label="median TTM", color="#73a946")
-    _ax2.bar(_xs + 0.2, _s2, width=0.4, label="median stage 2 (review→MM)", color="#c63")
-    _ax2.set_xticks(_xs)
-    _ax2.set_xticklabels(_bucket_x)
-    _ax2.set_xlabel("queue-cycle bucket")
-    _ax2.set_ylabel("days (median)")
-    _ax2.set_title("TTM and stage-2 latency by cycle bucket")
-    _ax2.legend()
+    # Per-cycle-count medians (no bucketing) + IQR for the fit-friendly plot.
+    # Keep only buckets with enough PRs that the median isn't noisy.
+    _MIN_N_PER_BUCKET = 30
+    _per_cycle = (
+        _merged.group_by("n_queue_cycles_before_mm")
+        .agg(
+            pl.len().alias("n_prs"),
+            pl.col("seconds_open_to_merged").median().alias("med_ttm_s"),
+            pl.col("seconds_open_to_merged").quantile(0.25).alias("p25_ttm_s"),
+            pl.col("seconds_open_to_merged").quantile(0.75).alias("p75_ttm_s"),
+            pl.col("seconds_first_touch_to_maintainer_merge")
+            .median()
+            .alias("med_s2_s"),
+            pl.col("seconds_first_touch_to_maintainer_merge")
+            .quantile(0.25)
+            .alias("p25_s2_s"),
+            pl.col("seconds_first_touch_to_maintainer_merge")
+            .quantile(0.75)
+            .alias("p75_s2_s"),
+        )
+        .filter(pl.col("n_prs") >= _MIN_N_PER_BUCKET)
+        .sort("n_queue_cycles_before_mm")
+    )
+    _xs_fit = _per_cycle.get_column("n_queue_cycles_before_mm").to_numpy()
+    _ttm_med = _per_cycle.get_column("med_ttm_s").to_numpy() / 86400.0
+    _ttm_p25 = _per_cycle.get_column("p25_ttm_s").to_numpy() / 86400.0
+    _ttm_p75 = _per_cycle.get_column("p75_ttm_s").to_numpy() / 86400.0
+    _s2_med = _per_cycle.get_column("med_s2_s").to_numpy() / 86400.0
+    _s2_p25 = _per_cycle.get_column("p25_s2_s").to_numpy() / 86400.0
+    _s2_p75 = _per_cycle.get_column("p75_s2_s").to_numpy() / 86400.0
+
+    def _ols(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float]:
+        if x.size < 2:
+            return 0.0, 0.0, float("nan")
+        _A = np.vstack([x, np.ones_like(x)]).T
+        _slope, _intercept = np.linalg.lstsq(_A, y, rcond=None)[0]
+        _pred = _slope * x + _intercept
+        _ss_res = float(np.sum((y - _pred) ** 2))
+        _ss_tot = float(np.sum((y - y.mean()) ** 2))
+        _r2 = 1.0 - _ss_res / _ss_tot if _ss_tot > 0 else float("nan")
+        return float(_slope), float(_intercept), _r2
+
+    _ttm_slope, _ttm_int, _ttm_r2 = _ols(_xs_fit, _ttm_med)
+    _s2_slope, _s2_int, _s2_r2 = _ols(_xs_fit, _s2_med)
+
+    _ax2.errorbar(
+        _xs_fit,
+        _ttm_med,
+        yerr=[_ttm_med - _ttm_p25, _ttm_p75 - _ttm_med],
+        fmt="o",
+        color="#73a946",
+        markersize=6,
+        capsize=3,
+        label="median TTM (IQR bars)",
+    )
+    _ax2.errorbar(
+        _xs_fit,
+        _s2_med,
+        yerr=[_s2_med - _s2_p25, _s2_p75 - _s2_med],
+        fmt="o",
+        color="#c63",
+        markersize=6,
+        capsize=3,
+        label="median stage 2 (IQR bars)",
+    )
+    if _xs_fit.size >= 2:
+        _xline = np.linspace(float(_xs_fit.min()), float(_xs_fit.max()), 100)
+        _ax2.plot(
+            _xline,
+            _ttm_slope * _xline + _ttm_int,
+            "--",
+            color="#73a946",
+            linewidth=1.0,
+            label=(
+                f"OLS TTM: {_ttm_slope:.2f} d/cycle + {_ttm_int:.2f} d "
+                f"(R²={_ttm_r2:.2f})"
+            ),
+        )
+        _ax2.plot(
+            _xline,
+            _s2_slope * _xline + _s2_int,
+            "--",
+            color="#c63",
+            linewidth=1.0,
+            label=(
+                f"OLS s2:  {_s2_slope:.2f} d/cycle + {_s2_int:.2f} d "
+                f"(R²={_s2_r2:.2f})"
+            ),
+        )
+    _ax2.set_xlabel("queue cycles before MM")
+    _ax2.set_ylabel("days (median, IQR bars)")
+    _ax2.set_title(
+        f"TTM & stage 2 vs cycle count "
+        f"(buckets with n ≥ {_MIN_N_PER_BUCKET}, OLS fit)"
+    )
+    _ax2.legend(fontsize=7)
     cycle_count_fig.tight_layout()
     cycle_count_fig
     return cycle_count_fig, cycle_table
@@ -1835,6 +1960,103 @@ def _(np, pl, plt, pr_pipeline):
 def _(cycle_table, mo):
     mo.md("**Cycle-bucket detail (merged PRs):**")
     cycle_table
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ### 4b. Queue-window duration by cycle index
+
+    Does each cycle look the same, or are early cycles systematically
+    longer / shorter than later ones? The overlay below shows the
+    duration distribution of closed pre-MM queue windows, one curve
+    per cycle index (1 = the PR's first queue window, 2 = second, …,
+    5+ pooled). Counts per curve are normalized to share so shapes are
+    directly comparable across cycle indices despite very different
+    sample sizes. If each cycle were i.i.d., the curves would land on
+    top of each other.
+
+    Restriction: closed windows only (open windows have no real
+    duration) and pre-MM only (post-MM cycles are RTM ping-pong, a
+    different process). Ruleset 3 (the dashboard's ruleset) only.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(asof, np, pl, plt, pr_pipeline, queue_window_intervals, queue_windows):
+    """Overlay per-cycle-index duration histograms for pre-MM queue windows.
+    Curves are normalized to share-of-cycle so shapes are comparable
+    across indices regardless of n."""
+    _qw = (
+        queue_window_intervals(queue_windows, asof=asof)
+        .filter(~pl.col("is_open"))
+        .join(
+            pr_pipeline.select("pull_request_id", "first_maintainer_merge_at"),
+            on="pull_request_id",
+            how="inner",
+        )
+        .filter(
+            pl.col("first_maintainer_merge_at").is_null()
+            | (pl.col("start") < pl.col("first_maintainer_merge_at"))
+        )
+        .with_columns(
+            pl.when(pl.col("cycle_index") >= 5)
+            .then(5)
+            .otherwise(pl.col("cycle_index"))
+            .alias("idx_bucket")
+        )
+    )
+
+    _COLORS = ["#4a90d9", "#73a946", "#c63", "#9d72c7", "#444"]
+    _LABELS = ["1st", "2nd", "3rd", "4th", "5th+"]
+
+    qw_idx_fig, _ax = plt.subplots(figsize=(11, 4.5))
+    _all = _qw.get_column("duration_days").to_numpy()
+    _all = _all[_all > 0]
+    if _all.size >= 5:
+        _edges = np.logspace(
+            np.log10(max(_all.min(), np.nextafter(0, 1))),
+            np.log10(_all.max()),
+            51,
+        )
+        for _idx, (_color, _label) in enumerate(zip(_COLORS, _LABELS), start=1):
+            _arr = (
+                _qw.filter(pl.col("idx_bucket") == _idx)
+                .get_column("duration_days")
+                .to_numpy()
+            )
+            _arr = _arr[_arr > 0]
+            if _arr.size > 0:
+                _counts, _ = np.histogram(_arr, bins=_edges)
+                _share = _counts / _counts.sum() if _counts.sum() > 0 else _counts
+                _y_step = np.r_[_share, _share[-1]]
+                _ax.step(
+                    _edges,
+                    _y_step,
+                    where="post",
+                    color=_color,
+                    linewidth=1.4,
+                    label=(
+                        f"{_label} (n={_arr.size}, "
+                        f"median={np.median(_arr):.2f}d, p90={np.percentile(_arr, 90):.2f}d)"
+                    ),
+                )
+                _ax.axvline(
+                    np.median(_arr),
+                    color=_color,
+                    linestyle="--",
+                    linewidth=0.7,
+                    alpha=0.6,
+                )
+        _ax.set_xscale("log")
+        _ax.set_xlabel("queue-window duration (days, log scale)")
+        _ax.set_ylabel("share of windows at that cycle index")
+        _ax.set_title("Pre-MM queue-window duration by cycle index")
+        _ax.legend(fontsize=8)
+    qw_idx_fig.tight_layout()
+    qw_idx_fig
     return
 
 
