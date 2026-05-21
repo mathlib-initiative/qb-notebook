@@ -70,7 +70,8 @@ def _():
     import numpy as np
     import plotly.graph_objects as go
     import polars as pl
-    from scipy.stats import lognorm
+    from scipy.optimize import minimize
+    from scipy.stats import lognorm, nbinom
 
     import plotly.io as pio
 
@@ -123,6 +124,8 @@ def _():
         labels_active_at,
         load_pr_interval_data,
         lognorm,
+        minimize,
+        nbinom,
         np,
         pipeline_stages,
         pl,
@@ -1775,9 +1778,12 @@ def _(mo):
     distribution is heavily skewed — most merged PRs reach MM in one
     queue cycle.
 
-    The left panel uses a log Y axis and overlays a shifted-geometric
-    MLE fit on support `k ≥ 1` (each cycle has an independent
-    probability `q` of being the last before MM). A clean geometric
+    The left panel uses a log Y axis with one bar per integer count
+    and the tail pooled into the rightmost `X+` bin at the per-cohort
+    p99 (matches §6's idiom). A shifted-geometric MLE fit on support
+    `k ≥ 1` is overlaid (each cycle has an independent probability `q`
+    of being the last before MM); the pooled bin's expected mass uses
+    the survival probability `(1 - q)^(cutoff - 1)`. A clean geometric
     would be a straight line on log Y; deviations show where the "each
     cycle independently signs off" model breaks down. Bin 0 (PRs that
     reached MM with no prior queue window) is excluded from the fit —
@@ -1824,24 +1830,35 @@ def _(np, pl, plt, pr_pipeline):
         .agg(pl.len().alias("n_prs"))
         .sort("n_queue_cycles_before_mm")
     )
-    _x = _raw_counts.get_column("n_queue_cycles_before_mm").to_numpy()
-    _y = _raw_counts.get_column("n_prs").to_numpy()
+    _x_full = _raw_counts.get_column("n_queue_cycles_before_mm").to_numpy()
+    _y_full = _raw_counts.get_column("n_prs").to_numpy()
+
+    # Pool the tail at p99 to match §6's idiom and avoid a long sparse run
+    # of ~zero bars. Recompute fit on the unpooled positive bins so the
+    # MLE isn't biased; the pooled bin's expected mass is the survival
+    # probability `(1 - q)^(cutoff - 1)`.
+    _all_vals = _merged.get_column("n_queue_cycles_before_mm").to_numpy().astype(int)
+    _cutoff = max(5, int(np.ceil(np.percentile(_all_vals, 99))))
+    _clipped = np.minimum(_all_vals, _cutoff)
+    _x = np.arange(0, _cutoff + 1)
+    _y = np.bincount(_clipped, minlength=_cutoff + 1)
 
     cycle_count_fig, (_ax1, _ax2) = plt.subplots(1, 2, figsize=(13, 4))
     _ax1.bar(_x, _y, color="#4a90d9", edgecolor="white")
     # Shifted-geometric MLE on support {1, 2, ...}: P(k) = (1-q)^(k-1) q,
-    # mean = 1/q. Bin 0 (PRs that reached MM with no prior queue window)
-    # is a small separate population — fit on bins ≥ 1 only. On log Y a
-    # shifted geometric is a straight line with slope log(1 - q).
-    _mask = _x >= 1
-    _x_pos, _y_pos = _x[_mask], _y[_mask]
-    if _y_pos.sum() > 0:
-        _mean_pos = float(np.average(_x_pos, weights=_y_pos))
+    # mean = 1/q. Fit on the unpooled positive counts (bin 0 is excluded
+    # — PRs that reached MM with no prior queue window are a small
+    # separate population).
+    _pos_vals = _all_vals[_all_vals >= 1]
+    if _pos_vals.size > 0:
+        _mean_pos = float(_pos_vals.mean())
         _q = 1.0 / _mean_pos if _mean_pos > 0 else 1.0
-        _xx = np.arange(1, int(_x.max()) + 1)
-        _expected = _y_pos.sum() * (1 - _q) ** (_xx - 1) * _q
+        _expected = _pos_vals.size * (1 - _q) ** (_x.astype(float) - 1) * _q
+        _expected[0] = np.nan  # no fit on bin 0
+        # Pooled tail bin: survival mass P(X ≥ cutoff) = (1-q)^(cutoff-1).
+        _expected[-1] = _pos_vals.size * (1 - _q) ** (_cutoff - 1)
         _ax1.plot(
-            _xx,
+            _x,
             _expected,
             color="#c63",
             marker="o",
@@ -1851,6 +1868,9 @@ def _(np, pl, plt, pr_pipeline):
         )
         _ax1.legend(fontsize=8)
     _ax1.set_yscale("log")
+    _labels = [str(i) for i in _x[:-1]] + [f"{_cutoff}+"]
+    _ax1.set_xticks(_x)
+    _ax1.set_xticklabels(_labels, rotation=0, fontsize=7)
     _ax1.set_xlabel("queue cycles before MM")
     _ax1.set_ylabel("merged PRs (log scale)")
     _ax1.set_title("Cycle count distribution (merged, log Y)")
@@ -2209,9 +2229,16 @@ def _(mo):
       `inline_comment_stats`)
 
     Inline comments are the closest "substantive review depth" proxy the
-    dataset offers (comment bodies aren't exported). Distributions are
-    log-binned over `1 + count` so PRs with zero comments still appear
-    in the leftmost bin.
+    dataset offers (comment bodies aren't exported). Each panel uses
+    integer X bins (one bar per count) with the tail pooled into the
+    rightmost `X+` bin at the per-signal p99; log Y reveals the
+    heavy-tail decay. A **negative-binomial** MLE is overlaid as the
+    fit reference: NB generalizes the geometric (geom = NB with r=1)
+    and accommodates the strong over-dispersion these counts show
+    (`var/mean` shown in each panel title — ≈ 4× for review events,
+    ≈ 2× for issue comments, ≈ 16× for inline comments). The pooled
+    bin's expected mass uses the survival probability
+    `P(X ≥ cutoff)`.
     """)
     return
 
@@ -2277,8 +2304,22 @@ def _(
 
 
 @app.cell
-def _(inline_counts, np, pl, plt, pr_pipeline, review_counts):
-    """3-panel review-activity distribution (merged PRs only)."""
+def _(
+    inline_counts,
+    minimize,
+    nbinom,
+    np,
+    pl,
+    plt,
+    pr_pipeline,
+    review_counts,
+):
+    """3-panel review-activity distribution (merged PRs only).
+    Linear X with one bar per integer count, tail pooled at the
+    rightmost p99 bin; log Y reveals the geometric-like tail. A
+    negative-binomial MLE is overlaid (NB generalizes the geometric —
+    geom = NB with r=1 — and handles the heavy over-dispersion of
+    these counts, particularly inline comments where var/mean ≈ 16)."""
     _merged = (
         pr_pipeline.filter(pl.col("is_merged"))
         .join(review_counts, on="pull_request_id", how="left")
@@ -2296,21 +2337,70 @@ def _(inline_counts, np, pl, plt, pr_pipeline, review_counts):
         ("n_inline_comments_by_others", "inline comments-by-others"),
     ]
 
+    def _fit_nb_mle(vals: np.ndarray) -> tuple[float, float]:
+        """Negative-binomial MLE on {0, 1, 2, ...}. Returns (r, p)."""
+        _mean = float(vals.mean())
+        _var = float(vals.var())
+        if _var > _mean:  # MoM seed
+            _p0 = _mean / _var
+            _r0 = _mean * _p0 / max(1 - _p0, 1e-9)
+        else:  # under-dispersed → seed at geom (r=1)
+            _r0 = 1.0
+            _p0 = 1.0 / (1.0 + _mean) if _mean > 0 else 0.5
+
+        def _neg_ll(params: np.ndarray) -> float:
+            _r, _p = params
+            if _r <= 0 or _p <= 0 or _p >= 1:
+                return 1e12
+            return float(-nbinom.logpmf(vals, n=_r, p=_p).sum())
+
+        _res = minimize(
+            _neg_ll, [_r0, _p0], method="Nelder-Mead", options={"xatol": 1e-6}
+        )
+        return float(_res.x[0]), float(_res.x[1])
+
+    def _draw_count(ax, vals: np.ndarray, title: str) -> None:
+        if vals.size == 0:
+            ax.set_title(f"{title} (empty)")
+            return
+        _p99 = int(np.ceil(np.percentile(vals, 99)))
+        _cutoff = max(5, _p99)
+        _clipped = np.minimum(vals.astype(int), _cutoff)
+        _xs = np.arange(0, _cutoff + 1)
+        _counts = np.bincount(_clipped, minlength=_cutoff + 1)
+        ax.bar(_xs, _counts, color="#4a90d9", edgecolor="white")
+        if vals.mean() > 0:
+            _r, _p = _fit_nb_mle(vals)
+            _expected = nbinom.pmf(_xs, n=_r, p=_p) * vals.size
+            # rightmost bin is pooled "≥ cutoff" → survival mass.
+            _expected[-1] = nbinom.sf(_cutoff - 1, n=_r, p=_p) * vals.size
+            ax.plot(
+                _xs,
+                _expected,
+                color="#c63",
+                marker="o",
+                markersize=4,
+                linewidth=1.5,
+                label=f"NB MLE: r={_r:.2f}, p={_p:.3f}, mean={vals.mean():.2f}",
+            )
+            ax.legend(fontsize=7)
+        ax.set_yscale("log")
+        _labels = [str(i) for i in _xs[:-1]] + [f"{_cutoff}+"]
+        ax.set_xticks(_xs)
+        ax.set_xticklabels(_labels, rotation=0, fontsize=7)
+        ax.set_xlabel("count")
+        _disp = float(vals.var() / vals.mean()) if vals.mean() > 0 else 0.0
+        ax.set_title(
+            f"{title}\nmedian={int(np.median(vals))}, "
+            f"p90={int(np.percentile(vals, 90))}, "
+            f"%zero={100 * (vals == 0).mean():.0f}%, "
+            f"var/mean={_disp:.1f}"
+        )
+
     review_activity_fig, _axes = plt.subplots(1, 3, figsize=(15, 4))
     for _ax, (_col, _title) in zip(_axes, _SIGNALS):
-        _vals = _merged.get_column(_col).to_numpy()
-        _x = 1.0 + _vals.astype(float)  # log-binnable
-        _lo = 1.0
-        _hi = max(_x.max(), 2.0)
-        _edges = np.logspace(np.log10(_lo), np.log10(_hi), 30)
-        _ax.hist(_x, bins=_edges, color="#4a90d9", edgecolor="white")
-        _ax.set_xscale("log")
-        _ax.set_xlabel("1 + count (log scale)")
-        _ax.set_title(
-            f"{_title}\nmedian={int(np.median(_vals))}, p90={int(np.percentile(_vals, 90))}, "
-            f"%zero={100 * (_vals == 0).mean():.0f}%"
-        )
-    _axes[0].set_ylabel("merged PRs")
+        _draw_count(_ax, _merged.get_column(_col).to_numpy(), _title)
+    _axes[0].set_ylabel("merged PRs (log scale)")
     review_activity_fig.tight_layout()
     review_activity_fig
     return (review_activity_fig,)
