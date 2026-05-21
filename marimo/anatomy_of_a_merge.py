@@ -18,24 +18,34 @@ def _(mo):
     mo.md("""
     # Anatomy of a merge
 
-    For each PR in the selected cohort we reconstruct a five-stage
-    milestone timeline:
+    For each PR in the selected cohort we reconstruct a milestone
+    timeline and route every PR through a lifecycle Sankey. The
+    segments, in roughly chronological order:
 
-    1. **opened** — `gh_created_at`
-    2. **first touch** — earliest non-author, non-bot
-       `REVIEW_*` / `ISSUE_COMMENTED` event (`first_review_touch`)
-    3. **maintainer-merge applied** — first `LABELED(maintainer-merge)`
-       (~99 % attributed to a human via the bot-trigger heuristic)
-    4. **ready-to-merge applied** — first `LABELED(ready-to-merge)`
-       (bors r+ accepted; `delegated` label tracked alongside)
-    5. **merged** — bors-aware effective merge timestamp
-       (`expr_merged_at_effective`)
+    1. **opened** — `gh_created_at`.
+    2. **1 queue cycle** — at least one review round completed;
+       underlying milestone is `first_touch_at` (earliest non-author,
+       non-bot `REVIEW_*` / `ISSUE_COMMENTED` event). PRs that never
+       receive a review or comment exit directly from `opened` to a
+       terminal state.
+    3. **2 queue cycles** / **3+ queue cycles** — extra cycle nodes
+       inserted for PRs that needed a second or third review round
+       before `maintainer-merge` (`n_queue_cycles_before_mm`). PRs
+       signed off after one round exit straight from `1 queue cycle`.
+    4. **maintainer-merge** — first `LABELED(maintainer-merge)`
+       (~99 % attributed to a human via the bot-trigger heuristic).
+    5. **bors r+** — first `LABELED(ready-to-merge)`; bors has
+       accepted the PR for the queue.
+    6. **delegated** — PR ever carried the `delegated` label; takes
+       precedence over `bors r+` in the Sankey routing when both apply.
+    7. **merged** / **closed** / **open** — terminal states from the
+       bors-aware effective merge timestamp
+       (`expr_merged_at_effective`), closure without a merge, or
+       still-open at snapshot time.
 
-    The lifecycle Sankey shows how the cohort fans out across these
-    milestones plus the three terminal states (merged, closed unmerged,
-    still open). For each stage we then plot the duration distribution
-    on log-spaced bins — PR open-durations are close to log-normal
-    (see `pr_open_durations.ipynb`), so log binning + lognormal-fit
+    For each stage we then plot the duration distribution on
+    log-spaced bins — PR open-durations are close to log-normal (see
+    `pr_open_durations.ipynb`), so log binning + lognormal-fit
     overlays make the shape readable.
 
     All cohort-dependent cells refire on the dropdown change.
@@ -59,6 +69,16 @@ def _():
     import plotly.graph_objects as go
     import polars as pl
     from scipy.stats import lognorm
+
+    import plotly.io as pio
+    pio.renderers[pio.renderers.default].config = {
+      "toImageButtonOptions": {"format": "png", "scale": 3}
+    }
+    # Match the 3× plotly modebar PNG resolution for matplotlib outputs
+    # (default dpi is 100). marimo scales the displayed image width
+    # inversely so the figure looks the same on screen but the
+    # right-click-saved PNG is at the higher pixel density.
+    plt.rcParams["figure.dpi"] = 300
 
     from qb_notebook.data_io import load_pr_interval_data
     from qb_notebook.filters import (
@@ -662,7 +682,7 @@ def _(mo):
     return
 
 
-@app.cell(hide_code=True)
+@app.cell
 def _(go, pr_pipeline, sankey_height, show_cycle_branches):
     """Build the Sankey from per-PR path classifications.
 
@@ -889,7 +909,7 @@ def _(mo):
     return
 
 
-@app.cell(hide_code=True)
+@app.cell
 def _(go, pr_pipeline, sankey_height):
     """Focus-mode Sankey: reuses §1's edge accumulation but always
     includes cycle nodes and embeds a plotly-native focus dropdown so a
@@ -1088,9 +1108,6 @@ def _(go, pr_pipeline, sankey_height):
     # behind the glyphs — `text-shadow` on SVG tspans is ignored by
     # most browsers, and the trace-level `textfont.shadow` is a single
     # value (no per-node array), so neither of those options work here.
-    # The dark halo uses `#333` and a thinner stroke than the light
-    # halo, since pure-black at the same width visually weighs each
-    # letter down ("stencil effect") and makes labels read as crowded.
     def _halo_color(bg_hex: str) -> str:
         h = bg_hex.lstrip("#")
         if len(h) == 3:
@@ -1177,7 +1194,7 @@ def _(go, pr_pipeline, sankey_height):
     return focus_edge_counts, focus_node_colors, focus_nodes
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     """Authoring helper: drag the Sankey nodes around, click this button,
     and the new `_NODE_X` / `_NODE_Y` dicts are printed to the browser
@@ -1247,7 +1264,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(focus_nodes, mo):
     """Node-selector for the §1c breakdown. Independent of the plotly
     `updatemenus` dropdown inside §1b — that one only restyles ribbon
@@ -1262,7 +1279,7 @@ def _(focus_nodes, mo):
     return (breakdown_node,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md("""
     ## 1c. In/out flow breakdown for the selected node
@@ -1275,7 +1292,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(breakdown_node, focus_edge_counts, focus_node_colors, mo, plt):
     """Render incoming + outgoing flow breakdowns for `breakdown_node` as
     side-by-side horizontal bar charts. Tables are emitted below the
@@ -1350,11 +1367,13 @@ def _(breakdown_node, focus_edge_counts, focus_node_colors, mo, plt):
         selection=None,
     )
 
-    mo.vstack([_fig, mo.hstack([_in_table, _out_table], widths="equal")])
+    _fig
+
+    # mo.vstack([_fig, mo.hstack([_in_table, _out_table], widths="equal")])
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md("""
     ## 2. Per-stage duration distributions
@@ -1373,7 +1392,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(lognorm, np, pl, plt, pr_pipeline):
     """4-panel log-binned histogram + lognormal fit, one panel per stage.
     Returns the figure as the cell output."""
@@ -1441,7 +1460,7 @@ def _(lognorm, np, pl, plt, pr_pipeline):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md("""
     ## 3. Stage share of total time-to-merge
@@ -1455,7 +1474,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(np, pl, plt, pr_pipeline):
     """Stage shares of TTM at the median, plus a per-stage median table."""
     _STAGE_COLS = [
