@@ -7,3 +7,4 @@ __pycache__/
 data/
 analytics-datasets.zip
 __marimo__/
+_site

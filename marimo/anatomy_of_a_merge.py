@@ -2487,7 +2487,9 @@ def _(mo):
     ## Export
 
     Pick a base folder (server-side, on the machine running marimo),
-    name the run, then click **Save outputs**. Files land in
+    name the run, then click **Save outputs**. If you don't click a
+    folder in the browser, the run falls back to the default base
+    `_site/exports/` (under the repo root). Files land in
     `<base>/<run name>/`:
 
     - `1b__<focus>.png` — one image per focus-dropdown state of §1b
@@ -2513,16 +2515,21 @@ def _(Path, mo):
     """Picker UI: a server-side folder browser, a run-name text input,
     and the Save button. `restrict_navigation=False` so the picker can
     point anywhere on disk; `_site/exports/` (under the repo root) is
-    the default starting directory because it's already gitignored."""
+    the default starting directory because it's already gitignored.
+
+    `save_default_base` is exported so the save cell can fall back to
+    it when the user hasn't clicked a folder in the browser
+    (`mo.ui.file_browser` requires an explicit click on an entry to
+    register a selection; `initial_path` alone doesn't count)."""
     _repo_root = Path(__file__).resolve().parents[1]
-    _default_base = _repo_root / "_site" / "exports"
-    _default_base.mkdir(parents=True, exist_ok=True)
+    save_default_base = _repo_root / "_site" / "exports"
+    save_default_base.mkdir(parents=True, exist_ok=True)
     save_dir_picker = mo.ui.file_browser(
-        initial_path=_default_base,
+        initial_path=save_default_base,
         selection_mode="directory",
         multiple=False,
         restrict_navigation=False,
-        label="Base folder (pick one directory)",
+        label=f"Base folder (pick one, or leave unselected to use {save_default_base})",
     )
     save_run_name = mo.ui.text(
         value="run",
@@ -2532,7 +2539,7 @@ def _(Path, mo):
     )
     save_btn = mo.ui.run_button(label="Save outputs", kind="success")
     mo.vstack([save_dir_picker, save_run_name, save_btn])
-    return save_btn, save_dir_picker, save_run_name
+    return save_btn, save_default_base, save_dir_picker, save_run_name
 
 
 @app.cell(hide_code=True)
@@ -2555,6 +2562,7 @@ def _(
     review_activity_fig,
     sankey_height,
     save_btn,
+    save_default_base,
     save_dir_picker,
     save_run_name,
     show_cycle_branches,
@@ -2580,9 +2588,15 @@ def _(
         mo.md("_Pick a base folder, name the run, then click **Save outputs**._"),
     )
 
+    # `mo.ui.file_browser` only registers a selection when the user
+    # clicks a directory entry — `initial_path` alone doesn't count.
+    # Fall back to `save_default_base` when nothing is selected so the
+    # button "just works" with the default `_site/exports/` location.
     _entries = save_dir_picker.value
-    mo.stop(not _entries, mo.md("**Pick a base folder first.**"))
-    _base = save_dir_picker.path(index=0)
+    if _entries:
+        _base = save_dir_picker.path(index=0)
+    else:
+        _base = save_default_base
     _name = (save_run_name.value or "run").strip() or "run"
     _out = _base / _name
     _out.mkdir(parents=True, exist_ok=True)
