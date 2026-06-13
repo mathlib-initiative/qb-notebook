@@ -8,3 +8,4 @@ data/
 analytics-datasets.zip
 __marimo__/
 _site
+_site_wasm/

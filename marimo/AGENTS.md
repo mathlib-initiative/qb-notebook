@@ -119,6 +119,16 @@ def _():
 `marimo check` is fast and catches most cell-graph mistakes (cycles,
 duplicate names, unused returns). Run it before committing.
 
+## Publishing notebooks as in-browser WASM (Pyodide)
+
+Notebooks can be published as an interactive static site (GitHub Pages)
+that runs entirely in the browser via WebAssembly. The full process —
+how the local `qb_notebook` package, the ~155 MB raw data, and the
+heavy deps are made browser-ready, the per-notebook conversion recipe,
+the build/preview commands, and the known version-shim gotchas — lives
+in [`docs/wasm-export.md`](../docs/wasm-export.md). `queue_window_state.py`
+is the reference conversion; copy its `is_wasm` bootstrap cell.
+
 ## Putting reusable logic somewhere else
 
 IO and reusable transforms belong in `qb_notebook/*` modules, not in
