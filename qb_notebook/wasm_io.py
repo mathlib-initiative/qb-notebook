@@ -32,6 +32,7 @@ from typing import Callable
 import polars as pl
 
 MANIFEST_NAME = "manifest.json"
+TEAMS_SNAPSHOT_NAME = "teams.json"
 
 # Byte-getter: maps a file name (relative to ``base``) to its raw bytes.
 ByteGetter = Callable[[str], bytes]
@@ -113,3 +114,23 @@ def load_slimmed_data(
         key: pl.read_parquet(io.BytesIO(getter(filename)))
         for key, filename in tables.items()
     }
+
+
+def load_teams_snapshot(
+    base: str | Path,
+    *,
+    get_bytes: ByteGetter | None = None,
+):
+    """Load a ``teams.json`` team-membership snapshot shipped under ``base``.
+
+    Returns a :class:`qb_notebook.teams.Teams`. ``base`` is the same
+    ``public/`` location as :func:`load_slimmed_data` (a URL in WASM, a local
+    directory otherwise). Team-overlay notebooks (``area_health``,
+    ``review_state_machine``, ``reviewer_load``) read this in the browser in
+    place of the ``leanprover-community.github.io`` checkout they use locally;
+    the snapshot is written into ``public/`` by ``scripts/build_wasm_site.py``.
+    """
+    from qb_notebook.teams import load_snapshot
+
+    getter = get_bytes if get_bytes is not None else _make_getter(base)
+    return load_snapshot(getter(TEAMS_SNAPSHOT_NAME))

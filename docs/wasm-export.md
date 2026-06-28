@@ -5,11 +5,14 @@ WebAssembly (Pyodide), so they can be published as an interactive static
 site (GitHub Pages). Viewers run everything locally in their browser — no
 server, no data sent anywhere.
 
-**Status (2026-06):** the pattern is proven end-to-end on
-`marimo/queue_window_state.py` — it boots, installs packages, fetches the
-slimmed data, and renders with live-recomputing UI controls in a real
-browser. The remaining work is templating it across the other 8 notebooks
-and adding a GitHub Pages deploy workflow (see [Remaining work](#remaining-work)).
+**Status (2026-06):** all 9 `marimo/*.py` notebooks are converted and the
+full site builds end-to-end (`build_wasm_site.py` with no `--notebook` builds
+every one). The pattern was first proven on `marimo/queue_window_state.py` —
+it boots, installs packages, fetches the slimmed data, and renders with
+live-recomputing UI controls in a real browser. Each conversion is verified
+offline by reproducing the notebook's compute on full vs. slimmed data (see
+[Verifying](#verifying-without-a-browser)). The remaining work is adding a
+GitHub Pages deploy workflow (see [Remaining work](#remaining-work)).
 
 ## Why this is non-trivial
 
@@ -55,10 +58,42 @@ in the browser, the notebook's bootstrap cell:
 
 | File | Role |
 | --- | --- |
-| `qb_notebook/wasm_io.py` | `load_slimmed_data(base)` — fetch slimmed parquet (HTTP in WASM, disk locally), return the `load_pr_interval_data` dict shape. `apply_wasm_compat_shims()` — runtime patches for Pyodide's older libs. |
-| `scripts/export_wasm_data.py` | `SPECS` (per-notebook `{table: [columns]}`) + `export_notebook(...)` — writes slimmed parquet + `manifest.json`. |
-| `scripts/build_wasm_site.py` | Orchestrates: builds wheel, runs `marimo export html-wasm`, stages `public/`, writes landing page. `WHEEL_NAME` must match the notebook bootstrap. |
+| `qb_notebook/wasm_io.py` | `load_slimmed_data(base)` — fetch slimmed parquet (HTTP in WASM, disk locally), return the `load_pr_interval_data` dict shape. `load_teams_snapshot(base)` — fetch the `teams.json` snapshot and return a `Teams`. `apply_wasm_compat_shims()` — runtime patches for Pyodide's older libs. |
+| `scripts/export_wasm_data.py` | `SPECS` (per-notebook `{table: [columns]}`), `EXTRA_TABLE_FILES` (non-`load_pr_interval_data` tables, e.g. `core_user`), `load_data_for_specs(...)` (loads the union), and `export_notebook(...)` — writes slimmed parquet + `manifest.json`. |
+| `scripts/build_wasm_site.py` | Orchestrates: builds wheel, runs `marimo export html-wasm`, stages `public/`, writes `teams.json` for team-overlay notebooks (`--teams-repo`), writes landing page. `WHEEL_NAME` must match the notebook bootstrap. |
+| `qb_notebook/teams.py` | `to_snapshot(teams)` / `load_snapshot(payload)` — round-trippable JSON form of the team membership sets (the build dumps it; `wasm_io.load_teams_snapshot` reads it). |
 | `marimo/queue_window_state.py` | Reference conversion. Copy its bootstrap cell + data-cell branch. |
+
+### Tables beyond `load_pr_interval_data` (`core_user`)
+
+Some notebooks read tables that `load_pr_interval_data` doesn't return —
+notably `core_user` (id → `github_login`). To ship one of these:
+
+1. Register it in `EXTRA_TABLE_FILES` in `scripts/export_wasm_data.py`
+   (`{"core_user": "core_user.parquet"}`) — mapping the SPECS key to the raw
+   parquet filename. `load_data_for_specs` then reads it via `data_io`'s
+   `_read_and_parse` (same dtypes) and merges it into the `data` dict, so the
+   exporter and notebook see it under that key.
+2. Add the columns to the notebook's `SPECS` entry like any other table.
+3. Branch the notebook's load on `is_wasm`: read `data["core_user"]` from the
+   slimmed bundle in WASM, `pl.read_parquet(.../core_user.parquet)` locally.
+
+`inline_comments` is an *optional* `load_pr_interval_data` key — putting it in
+a SPECS entry ships it (keeping that section identical in-browser); a build on
+an artifact that lacks it errors clearly, matching the notebook's own
+expectations.
+
+### Team-overlay notebooks (`teams.json`)
+
+`area_health`, `review_state_machine`, and `reviewer_load` overlay
+reviewer/maintainer team membership, which locally comes from a sibling
+`leanprover-community.github.io` checkout. In WASM that checkout is absent, so
+`build_wasm_site.write_teams_snapshot` dumps a `teams.json` snapshot into each
+team notebook's `public/` (source dir via `--teams-repo`, default sibling
+checkout; **empty snapshot + loud warning** if the checkout is missing). The
+notebook's teams cell branches on `is_wasm`: `load_teams_snapshot(...)` in the
+browser, the sibling-checkout `load(...)` locally. The set of team notebooks
+is `build_wasm_site.TEAMS_NOTEBOOKS`.
 
 ## Converting a notebook (recipe)
 
@@ -193,9 +228,11 @@ much as possible offline, then a human hard-reloads the served page:
   dir and point `load_slimmed_data` at a relative `../_data` URL.
 - **Team-overlay notebooks** (`area_health`, `reviewer_load`,
   `review_state_machine`) need `../leanprover-community.github.io` locally. In
-  WASM that checkout is absent — ship a `teams.json` snapshot
-  (`python -m qb_notebook.teams --repo ... --output ...`) into `public/` and
-  load that, or let them fall through to empty team sets.
+  WASM that checkout is absent, so the build ships a `teams.json` snapshot into
+  `public/` and the notebook loads it via `wasm_io.load_teams_snapshot` (see
+  [Team-overlay notebooks](#team-overlay-notebooks-teamsjson) above). For a
+  *publish* build, point `--teams-repo` at a real checkout — otherwise the
+  snapshot is empty and the in-browser overlays render blank.
 
 ### Environment limits
 
@@ -209,13 +246,28 @@ launch Chromium (it SIGSEGVs). So:
 - `marimo export html-wasm`, `marimo check`, `uv build`, and the slimming /
   HTTP / isolated-venv checks above all **work** (no kernel, no browser).
 
+## Deployment (GitHub Pages)
+
+Deployment is wired into `.github/workflows/publish-plots-pages.yml` (the same
+workflow that builds the static plot site — a repo gets only one Pages
+deployment, so they share one artifact). On the daily schedule / manual
+dispatch it: downloads the data artifact, checks out
+`leanprover-community.github.io` (for the team snapshots), generates the plot
+site into `_site/`, then runs
+`build_wasm_site.py --site-dir _site/notebooks --teams-repo <checkout>`, and
+uploads `_site` once. Result: plot site at `/`, interactive notebooks at
+`/notebooks/`. CI has the same no-kernel constraint as the sandbox, but
+`marimo export html-wasm` and `uv build` are fine there.
+
 ## Remaining work
 
-- Convert the other 8 notebooks using the recipe above; extend `SPECS`.
-- Add shims to `apply_wasm_compat_shims` for each version gap that surfaces.
-- Add a GitHub Pages workflow: on push, `uv sync`, fetch the data artifact
-  (`download_artifact.py`), run `build_wasm_site.py --site-dir _site`, then
-  `actions/upload-pages-artifact` + `actions/deploy-pages`. Note CI has the
-  same no-kernel constraint, but `export html-wasm` is fine there.
+- Add shims to `apply_wasm_compat_shims` for each new version gap that
+  surfaces during in-browser testing.
 - Consider a small reusable "slim == full" verification harness rather than a
   per-notebook throwaway script.
+- Optional: link `/notebooks/` from the plot-site landing page (and vice
+  versa) for discoverability — currently each is reachable only by URL.
+
+All 9 notebooks are converted (`SPECS` covers each one) and the combined
+Pages workflow is in place; the pipeline is feature-complete pending a
+human in-browser smoke test of the deployed site.

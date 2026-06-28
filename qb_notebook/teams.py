@@ -38,6 +38,9 @@ logger = logging.getLogger(__name__)
 
 
 TEAM_KEY_ALIASES: Mapping[str, str] = {
+    # Upstream renamed "Maintainer team" -> "Mathlib maintainers"; keep the
+    # old name aliased too so older website checkouts still resolve.
+    "Mathlib maintainers": "maintainers",
     "Maintainer team": "maintainers",
     "Mathlib reviewers": "reviewers",
     "Admin team": "admins",
@@ -92,6 +95,40 @@ class Teams:
         for members in self.by_team.values():
             out |= members
         return frozenset(out)
+
+
+def to_snapshot(teams: Teams) -> dict:
+    """Serialize a :class:`Teams` to the JSON-snapshot mapping.
+
+    Inverse of :func:`load_snapshot`; shared by the CLI dump and the WASM
+    build so the two can't drift. ``name_to_login`` is intentionally omitted.
+    """
+    return {
+        "by_team": {key: sorted(logins) for key, logins in teams.by_team.items()},
+        "unmatched": [list(pair) for pair in teams.unmatched],
+    }
+
+
+def load_snapshot(payload: Mapping | str | bytes) -> Teams:
+    """Reconstruct a :class:`Teams` from a JSON snapshot.
+
+    Inverse of the ``python -m qb_notebook.teams`` CLI dump: accepts the
+    parsed ``{"by_team": {alias: [logins]}, "unmatched": [[team, name]]}``
+    mapping (or its raw ``str`` / ``bytes`` JSON) and returns a ``Teams``.
+
+    ``name_to_login`` is intentionally not part of the snapshot — downstream
+    analyses only need the per-team login sets — so it comes back empty.
+    Used by the WASM builds, where the ``leanprover-community.github.io``
+    checkout is absent and team membership ships as a ``teams.json`` snapshot
+    (see :func:`qb_notebook.wasm_io.load_teams_snapshot`).
+    """
+    if isinstance(payload, (str, bytes)):
+        payload = json.loads(payload)
+    by_team = {
+        key: frozenset(logins) for key, logins in payload.get("by_team", {}).items()
+    }
+    unmatched = tuple(tuple(pair) for pair in payload.get("unmatched", []))
+    return Teams(by_team=by_team, name_to_login={}, unmatched=unmatched)
 
 
 def load(
@@ -190,11 +227,7 @@ def _main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     teams = load(args.repo)
-    payload = {
-        "by_team": {k: sorted(v) for k, v in teams.by_team.items()},
-        "unmatched": [list(pair) for pair in teams.unmatched],
-    }
-    text = json.dumps(payload, indent=2, sort_keys=True)
+    text = json.dumps(to_snapshot(teams), indent=2, sort_keys=True)
     if args.output == "-":
         print(text)
     else:

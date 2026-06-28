@@ -14,6 +14,50 @@ def _():
 
 
 @app.cell
+async def _(mo):
+    # WASM/Pyodide bootstrap. In the browser (`sys.platform == "emscripten"`)
+    # qb_notebook is not on the path and the raw `data/` dir doesn't exist, so
+    # we micropip-install the packaged wheel + slimmed-data loader deps here,
+    # before any `qb_notebook` import runs. Threading `is_wasm` into the
+    # downstream import/data cells enforces that ordering via marimo's DAG.
+    # No-op under a normal local kernel (`uv run marimo edit ...`). Locals are
+    # `_`-prefixed so only `is_wasm` enters the cross-cell namespace.
+    import sys as _sys
+
+    is_wasm = _sys.platform == "emscripten"
+    if is_wasm:
+        import micropip as _micropip
+
+        # Patch stdlib urllib onto the browser fetch API so wasm_io can pull
+        # the parquet files over HTTP.
+        _ = await _micropip.install("pyodide-http")
+        import pyodide_http as _pyodide_http
+
+        _ = _pyodide_http.patch_all()
+
+        # qb_notebook's eager __init__ transitively imports these. Install
+        # them explicitly so the wheel installs with deps=False (its metadata
+        # still lists the full dev set, incl. kaleido, which has no Pyodide
+        # build). pyarrow is needed because marimo patches pl.read_parquet to
+        # route through it in WASM (qb_notebook.wasm_io reads the slimmed
+        # parquet). pyyaml backs qb_notebook.teams.
+        _ = await _micropip.install(
+            ["polars", "pandas", "numpy", "pyarrow", "matplotlib", "scipy", "pyyaml"]
+        )
+        _wheel = (
+            mo.notebook_location() / "public" / "qb_notebook-0.1.0-py3-none-any.whl"
+        )
+        _ = await _micropip.install(str(_wheel), deps=False)
+
+        # Patch library API gaps vs. Pyodide's older builds (e.g. matplotlib
+        # boxplot tick_labels). No-op on new-enough libraries.
+        from qb_notebook.wasm_io import apply_wasm_compat_shims as _apply_shims
+
+        _apply_shims()
+    return (is_wasm,)
+
+
+@app.cell
 def _(mo):
     mo.md("""
     # Topic-area health (`t-*` labels)
@@ -28,13 +72,16 @@ def _(mo):
 
 
 @app.cell
-def _():
+def _(is_wasm):
     import sys
     from pathlib import Path
 
-    _repo_root = Path(__file__).resolve().parents[1]
-    if str(_repo_root) not in sys.path:
-        sys.path.insert(0, str(_repo_root))
+    if not is_wasm:
+        # `__file__` is undefined in the WASM runtime; only needed to find the
+        # repo root for the local kernel (where qb_notebook lives on disk).
+        _repo_root = Path(__file__).resolve().parents[1]
+        if str(_repo_root) not in sys.path:
+            sys.path.insert(0, str(_repo_root))
 
     from datetime import datetime, timedelta, timezone
 
@@ -48,9 +95,11 @@ def _():
         label_intervals,
         label_overlap_seconds,
         labels_active_at,
+        queue_window_intervals,
         reviewers_court_intervals,
     )
     from qb_notebook.teams import load as load_teams
+    from qb_notebook.wasm_io import load_slimmed_data, load_teams_snapshot
 
     return (
         Path,
@@ -60,11 +109,14 @@ def _():
         label_overlap_seconds,
         labels_active_at,
         load_pr_interval_data,
+        load_slimmed_data,
         load_teams,
+        load_teams_snapshot,
         merged_prs_frame,
         np,
         pl,
         plt,
+        queue_window_intervals,
         reviewers_court_intervals,
         timedelta,
         timezone,
@@ -72,9 +124,22 @@ def _():
 
 
 @app.cell
-def _(Path, datetime, load_pr_interval_data, timezone):
-    _data_dir = Path(__file__).resolve().parents[1] / "data"
-    data = load_pr_interval_data(_data_dir)
+def _(
+    Path,
+    datetime,
+    is_wasm,
+    load_pr_interval_data,
+    load_slimmed_data,
+    mo,
+    timezone,
+):
+    if is_wasm:
+        # Slimmed per-notebook parquet shipped under the site's public/ folder
+        # (see scripts/export_wasm_data.py); same dict shape as the full loader.
+        data = load_slimmed_data(str(mo.notebook_location() / "public"))
+    else:
+        _data_dir = Path(__file__).resolve().parents[1] / "data"
+        data = load_pr_interval_data(_data_dir)
     prs = data["prs"]
     events = data["events"]
     label_defs = data["label_defs"]
@@ -85,28 +150,40 @@ def _(Path, datetime, load_pr_interval_data, timezone):
 
 
 @app.cell
-def _(Path, load_teams, mo):
-    """Optional team-membership overlay used by the reviewer × area matrix
-    below. Falls through gracefully if the sibling
-    `leanprover-community.github.io` checkout is missing."""
-    _candidate = Path(__file__).resolve().parents[2] / "leanprover-community.github.io"
-    if _candidate.exists():
-        teams = load_teams(_candidate, warn_on_unmatched=False)
+def _(Path, is_wasm, load_teams, load_teams_snapshot, mo):
+    """Team-membership overlay used by the reviewer × area matrix below.
+    In WASM it loads the `teams.json` snapshot shipped under public/ (see
+    scripts/build_wasm_site.write_teams_snapshot); locally it reads the
+    sibling `leanprover-community.github.io` checkout, falling through
+    gracefully if that checkout is missing."""
+    if is_wasm:
+        teams = load_teams_snapshot(str(mo.notebook_location() / "public"))
         teams_status = mo.md(
-            f"Loaded teams from `{_candidate}` — "
+            f"Loaded team snapshot — "
             f"{len(teams.reviewers)} reviewers, "
-            f"{len(teams.maintainers)} maintainers, "
-            f"{len(teams.unmatched)} unmatched."
+            f"{len(teams.maintainers)} maintainers."
         )
     else:
-        teams = None
-        teams_status = mo.callout(
-            mo.md(
-                f"Sibling checkout `{_candidate}` not found — "
-                "team-membership overlays disabled."
-            ),
-            kind="warn",
+        _candidate = (
+            Path(__file__).resolve().parents[2] / "leanprover-community.github.io"
         )
+        if _candidate.exists():
+            teams = load_teams(_candidate, warn_on_unmatched=False)
+            teams_status = mo.md(
+                f"Loaded teams from `{_candidate}` — "
+                f"{len(teams.reviewers)} reviewers, "
+                f"{len(teams.maintainers)} maintainers, "
+                f"{len(teams.unmatched)} unmatched."
+            )
+        else:
+            teams = None
+            teams_status = mo.callout(
+                mo.md(
+                    f"Sibling checkout `{_candidate}` not found — "
+                    "team-membership overlays disabled."
+                ),
+                kind="warn",
+            )
     teams_status
     return (teams,)
 
@@ -212,6 +289,71 @@ def _(np, open_backlog, plt):
 @app.cell
 def _(mo):
     mo.md("""
+    ### Currently on the queue by area
+
+    Same shape as above but counts only PRs with an **open queue window**
+    in ruleset 3 (i.e. currently eligible for reviewer attention). Age is
+    the **total time on queue across cycles** — the sum of every queue
+    window's duration per PR, so a PR that bounced between queue and
+    author-court accumulates only its on-queue time. Currently-open
+    windows contribute up to `asof`.
+    """)
+    return
+
+
+@app.cell
+def _(asof, pl, prlabel, queue_window_intervals, queue_windows, t_label_defs):
+    _windows = queue_window_intervals(queue_windows, asof=asof)
+    _on_queue_prs = (
+        _windows.filter(pl.col("is_open")).select("pull_request_id").unique()
+    )
+    _total_on_queue = (
+        _windows.join(_on_queue_prs, on="pull_request_id", how="inner")
+        .group_by("pull_request_id")
+        .agg(pl.col("duration_days").sum().alias("total_on_queue_d"))
+    )
+    queue_backlog = (
+        prlabel.join(t_label_defs, left_on="label_def_id", right_on="id", how="inner")
+        .join(_total_on_queue, on="pull_request_id", how="inner")
+        .group_by("name")
+        .agg(
+            [
+                pl.len().alias("on_queue_prs"),
+                pl.col("total_on_queue_d").median().alias("median_on_queue_d"),
+                pl.col("total_on_queue_d").quantile(0.9).alias("p90_on_queue_d"),
+            ]
+        )
+        .sort("on_queue_prs", descending=True)
+    )
+    queue_backlog
+    return (queue_backlog,)
+
+
+@app.cell
+def _(np, plt, queue_backlog):
+    _names = queue_backlog["name"].to_numpy()
+    _counts = queue_backlog["on_queue_prs"].to_numpy()
+    _ages = queue_backlog["median_on_queue_d"].to_numpy()
+    _y = np.arange(len(_names))
+    _fig, (_ax1, _ax2) = plt.subplots(
+        1, 2, figsize=(12, max(4, 0.28 * len(_names))), sharey=True
+    )
+    _ax1.barh(_y, _counts, color="#6aa3d8")
+    _ax1.set_yticks(_y, _names)
+    _ax1.invert_yaxis()
+    _ax1.set_xlabel("PRs on queue")
+    _ax1.set_title("PRs currently on queue by area")
+    _ax2.barh(_y, _ages, color="#c69")
+    _ax2.set_xlabel("Median total time on queue (days)")
+    _ax2.set_title("Median total queue time by area")
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
     ## 2. Throughput
 
     Merges (to master, bors-aware) attributed to the `t-*` label active
@@ -223,13 +365,7 @@ def _(mo):
 
 
 @app.cell
-def _(
-    labels_active_at,
-    merged_prs_frame,
-    pl,
-    prs,
-    t_intervals,
-):
+def _(labels_active_at, merged_prs_frame, pl, prs, t_intervals):
     """Per (area, merge_month) row for every merge-to-master event whose PR
     carried at least one `t-*` label at merge time."""
     merged = merged_prs_frame(prs, effective_col="merged_at").select(

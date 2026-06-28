@@ -28,20 +28,29 @@ Build a single notebook::
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
-from scripts.export_wasm_data import SPECS, export_notebook
-from qb_notebook.data_io import load_pr_interval_data
+from scripts.export_wasm_data import SPECS, export_notebook, load_data_for_specs
+from qb_notebook.teams import load as load_teams_repo
+from qb_notebook.teams import to_snapshot as teams_to_snapshot
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MARIMO_DIR = REPO_ROOT / "marimo"
 
 # Must match the wheel name referenced in each notebook's WASM bootstrap cell.
 WHEEL_NAME = "qb_notebook-0.1.0-py3-none-any.whl"
+
+# Notebooks that overlay reviewer/maintainer team membership. They read a
+# `leanprover-community.github.io` checkout locally; in WASM that checkout is
+# absent, so the build ships a `teams.json` snapshot into their `public/`
+# (loaded via qb_notebook.wasm_io.load_teams_snapshot). Default snapshot
+# source is a sibling checkout (override with --teams-repo).
+TEAMS_NOTEBOOKS = frozenset({"area_health", "review_state_machine", "reviewer_load"})
+DEFAULT_TEAMS_REPO = REPO_ROOT.parent / "leanprover-community.github.io"
 
 
 def build_wheel(dest_dir: Path) -> Path:
@@ -90,17 +99,46 @@ def export_wasm_html(notebook: str, out_dir: Path) -> None:
     )
 
 
+def write_teams_snapshot(public: Path, teams_repo: Path) -> None:
+    """Write ``public/teams.json`` for a team-overlay notebook.
+
+    Reads the ``leanprover-community.github.io`` checkout at ``teams_repo`` and
+    dumps the same snapshot shape as the ``qb_notebook.teams`` CLI. If the
+    checkout is absent, ships an **empty** snapshot (so the in-browser fetch
+    still succeeds and the notebook falls through to blank overlays) and logs a
+    loud warning — a publish build must point --teams-repo at a real checkout.
+    """
+    if teams_repo.exists():
+        teams = load_teams_repo(teams_repo, warn_on_unmatched=False)
+        payload = teams_to_snapshot(teams)
+        n_members = sum(len(v) for v in payload["by_team"].values())
+        print(
+            f"  teams.json: {len(payload['by_team'])} teams, "
+            f"{n_members} memberships from {teams_repo}"
+        )
+    else:
+        payload = {"by_team": {}, "unmatched": []}
+        print(
+            f"  WARNING: teams repo not found at {teams_repo}; shipping EMPTY "
+            "teams.json (in-browser team overlays will be blank)"
+        )
+    (public / "teams.json").write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+
 def build_notebook(
     notebook: str,
     data: dict,
     wheel: Path,
     site_dir: Path,
+    teams_repo: Path,
 ) -> None:
     out_dir = site_dir / notebook
     export_wasm_html(notebook, out_dir)
     public = out_dir / "public"
     export_notebook(notebook, data, public)
     shutil.copy2(wheel, public / wheel.name)
+    if notebook in TEAMS_NOTEBOOKS:
+        write_teams_snapshot(public, teams_repo)
 
 
 def write_landing(site_dir: Path, notebooks: list[str]) -> None:
@@ -142,6 +180,12 @@ def main() -> None:
     ap.add_argument("--notebook", help="build only this notebook")
     ap.add_argument("--data-dir", default="data", help="raw parquet directory")
     ap.add_argument("--site-dir", default="_site_wasm", help="output site dir")
+    ap.add_argument(
+        "--teams-repo",
+        default=str(DEFAULT_TEAMS_REPO),
+        help="leanprover-community.github.io checkout for the teams.json "
+        "snapshot (team-overlay notebooks); empty snapshot if absent",
+    )
     args = ap.parse_args()
 
     notebooks = [args.notebook] if args.notebook else sorted(SPECS)
@@ -150,17 +194,18 @@ def main() -> None:
         ap.error(f"no WASM spec for: {unknown} (known: {sorted(SPECS)})")
 
     site_dir = Path(args.site_dir)
+    teams_repo = Path(args.teams_repo)
     print(f"Building WASM site for {notebooks} -> {site_dir}")
 
     print("Building qb_notebook wheel ...")
     wheel = build_wheel(site_dir / "_wheel_stage")
 
     print(f"Loading raw data from {args.data_dir} ...")
-    data = load_pr_interval_data(args.data_dir)
+    data = load_data_for_specs(args.data_dir, notebooks)
 
     for nb in notebooks:
         print(f"\n=== {nb} ===")
-        build_notebook(nb, data, wheel, site_dir)
+        build_notebook(nb, data, wheel, site_dir, teams_repo)
 
     shutil.rmtree(site_dir / "_wheel_stage", ignore_errors=True)
     write_landing(site_dir, notebooks)

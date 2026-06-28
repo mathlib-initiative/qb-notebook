@@ -14,6 +14,50 @@ def _():
 
 
 @app.cell
+async def _(mo):
+    # WASM/Pyodide bootstrap. In the browser (`sys.platform == "emscripten"`)
+    # qb_notebook is not on the path and the raw `data/` dir doesn't exist, so
+    # we micropip-install the packaged wheel + slimmed-data loader deps here,
+    # before any `qb_notebook` import runs. Threading `is_wasm` into the
+    # downstream import/data cells enforces that ordering via marimo's DAG.
+    # No-op under a normal local kernel (`uv run marimo edit ...`). Locals are
+    # `_`-prefixed so only `is_wasm` enters the cross-cell namespace.
+    import sys as _sys
+
+    is_wasm = _sys.platform == "emscripten"
+    if is_wasm:
+        import micropip as _micropip
+
+        # Patch stdlib urllib onto the browser fetch API so wasm_io can pull
+        # the parquet files over HTTP.
+        _ = await _micropip.install("pyodide-http")
+        import pyodide_http as _pyodide_http
+
+        _ = _pyodide_http.patch_all()
+
+        # qb_notebook's eager __init__ transitively imports these. Install
+        # them explicitly so the wheel installs with deps=False (its metadata
+        # still lists the full dev set, incl. kaleido, which has no Pyodide
+        # build). pyarrow is needed because marimo patches pl.read_parquet to
+        # route through it in WASM (qb_notebook.wasm_io reads the slimmed
+        # parquet).
+        _ = await _micropip.install(
+            ["polars", "pandas", "numpy", "pyarrow", "matplotlib", "scipy", "pyyaml"]
+        )
+        _wheel = (
+            mo.notebook_location() / "public" / "qb_notebook-0.1.0-py3-none-any.whl"
+        )
+        _ = await _micropip.install(str(_wheel), deps=False)
+
+        # Patch library API gaps vs. Pyodide's older builds (e.g. matplotlib
+        # boxplot tick_labels). No-op on new-enough libraries.
+        from qb_notebook.wasm_io import apply_wasm_compat_shims as _apply_shims
+
+        _apply_shims()
+    return (is_wasm,)
+
+
+@app.cell
 def _(mo):
     mo.md("""
     # Request / assignment effectiveness
@@ -58,13 +102,16 @@ def _(mo):
 
 
 @app.cell
-def _():
+def _(is_wasm):
     import sys
     from pathlib import Path
 
-    _repo_root = Path(__file__).resolve().parents[1]
-    if str(_repo_root) not in sys.path:
-        sys.path.insert(0, str(_repo_root))
+    if not is_wasm:
+        # `__file__` is undefined in the WASM runtime; only needed to find the
+        # repo root for the local kernel (where qb_notebook lives on disk).
+        _repo_root = Path(__file__).resolve().parents[1]
+        if str(_repo_root) not in sys.path:
+            sys.path.insert(0, str(_repo_root))
 
     from datetime import datetime, timezone
 
@@ -99,6 +146,7 @@ def _():
         attribute_label_events,
         label_intervals,
     )
+    from qb_notebook.wasm_io import load_slimmed_data
 
     return (
         ASSIGNMENT_BOT_ACTORS,
@@ -118,6 +166,7 @@ def _():
         expr_merged_to_master,
         label_intervals,
         load_pr_interval_data,
+        load_slimmed_data,
         np,
         pl,
         plt,
@@ -130,13 +179,29 @@ def _():
 
 
 @app.cell
-def _(Path, datetime, load_pr_interval_data, pl, timezone):
-    _data_dir = Path(__file__).resolve().parents[1] / "data"
-    data = load_pr_interval_data(_data_dir)
+def _(
+    Path,
+    datetime,
+    is_wasm,
+    load_pr_interval_data,
+    load_slimmed_data,
+    mo,
+    pl,
+    timezone,
+):
+    # core_user maps author_id -> github_login (author_login). In WASM it ships
+    # as a slimmed table under public/ (see scripts/export_wasm_data.py);
+    # locally it's read directly off disk (not a load_pr_interval_data key).
+    if is_wasm:
+        data = load_slimmed_data(str(mo.notebook_location() / "public"))
+        _users = data["core_user"]
+    else:
+        _data_dir = Path(__file__).resolve().parents[1] / "data"
+        data = load_pr_interval_data(_data_dir)
+        _users = pl.read_parquet(_data_dir / "core_user.parquet")
     events = data["events"]
     prs_raw = data["prs"]
     queue_windows = data["queue_windows"]
-    _users = pl.read_parquet(_data_dir / "core_user.parquet")
     users = _users.select(
         pl.col("id").alias("author_id"),
         pl.col("github_login").alias("author_login"),

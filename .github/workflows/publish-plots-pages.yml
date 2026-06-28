@@ -1,4 +1,4 @@
-name: Publish Plots To GitHub Pages
+name: Publish Plots & Notebooks To GitHub Pages
 
 on:
   workflow_dispatch:
@@ -16,11 +16,21 @@ concurrency:
 
 jobs:
   build:
-    name: Build Plot Site
+    name: Build Plots & Notebooks Site
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # Team membership for the WASM notebook overlays (area_health,
+      # review_state_machine, reviewer_load). Checked out into a subdir and
+      # passed to build_wasm_site via --teams-repo; without it those notebooks
+      # would ship an empty teams.json (blank in-browser overlays).
+      - name: Checkout leanprover-community.github.io (team membership)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: leanprover-community/leanprover-community.github.io
+          path: leanprover-community.github.io
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
@@ -50,6 +60,20 @@ jobs:
           MPLCONFIGDIR: /tmp/matplotlib
           XDG_CACHE_HOME: /tmp/xdg-cache
         run: uv run python -m qb_notebook.generate_plot_site --data-dir data --site-dir _site
+
+      # Interactive WASM notebooks under /notebooks/ (plot site stays at root).
+      # Reuses the data dir downloaded above; teams.json comes from the sibling
+      # checkout. `marimo export html-wasm` and `uv build` need no kernel, so
+      # they run fine in CI.
+      - name: Build WASM notebook site
+        env:
+          MPLCONFIGDIR: /tmp/matplotlib
+          XDG_CACHE_HOME: /tmp/xdg-cache
+        run: >
+          uv run python -m scripts.build_wasm_site
+          --data-dir data
+          --site-dir _site/notebooks
+          --teams-repo leanprover-community.github.io
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0

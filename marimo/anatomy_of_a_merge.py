@@ -14,6 +14,61 @@ def _():
 
 
 @app.cell(hide_code=True)
+async def _(mo):
+    # WASM/Pyodide bootstrap. In the browser (`sys.platform == "emscripten"`)
+    # qb_notebook is not on the path and the raw `data/` dir doesn't exist, so
+    # we micropip-install the packaged wheel + slimmed-data loader deps here,
+    # before any `qb_notebook` import runs. Threading `is_wasm` into the
+    # downstream import/data cells enforces that ordering via marimo's DAG.
+    # No-op under a normal local kernel (`uv run marimo edit ...`). Locals are
+    # `_`-prefixed so only `is_wasm` enters the cross-cell namespace.
+    import sys as _sys
+
+    is_wasm = _sys.platform == "emscripten"
+    if is_wasm:
+        import micropip as _micropip
+
+        # Patch stdlib urllib onto the browser fetch API so wasm_io can pull
+        # the parquet files over HTTP.
+        _ = await _micropip.install("pyodide-http")
+        import pyodide_http as _pyodide_http
+
+        _ = _pyodide_http.patch_all()
+
+        # qb_notebook's eager __init__ transitively imports these. Install
+        # them explicitly so the wheel installs with deps=False (its metadata
+        # still lists the full dev set, incl. kaleido, which has no Pyodide
+        # build). pyarrow is needed because marimo patches pl.read_parquet to
+        # route through it in WASM (qb_notebook.wasm_io reads the slimmed
+        # parquet). plotly backs the lifecycle Sankey (pure-Python wheel;
+        # kaleido — its PNG-export backend — has no Pyodide build, so the
+        # offline export cells are guarded behind `not is_wasm` below).
+        _ = await _micropip.install(
+            [
+                "polars",
+                "pandas",
+                "numpy",
+                "pyarrow",
+                "matplotlib",
+                "scipy",
+                "pyyaml",
+                "plotly",
+            ]
+        )
+        _wheel = (
+            mo.notebook_location() / "public" / "qb_notebook-0.1.0-py3-none-any.whl"
+        )
+        _ = await _micropip.install(str(_wheel), deps=False)
+
+        # Patch library API gaps vs. Pyodide's older builds (e.g. matplotlib
+        # boxplot tick_labels). No-op on new-enough libraries.
+        from qb_notebook.wasm_io import apply_wasm_compat_shims as _apply_shims
+
+        _apply_shims()
+    return (is_wasm,)
+
+
+@app.cell(hide_code=True)
 def _(mo):
     mo.md("""
     # Anatomy of a merge
@@ -54,13 +109,16 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _():
+def _(is_wasm):
     import sys
     from pathlib import Path
 
-    _repo_root = Path(__file__).resolve().parents[1]
-    if str(_repo_root) not in sys.path:
-        sys.path.insert(0, str(_repo_root))
+    if not is_wasm:
+        # `__file__` is undefined in the WASM runtime; only needed to find the
+        # repo root for the local kernel (where qb_notebook lives on disk).
+        _repo_root = Path(__file__).resolve().parents[1]
+        if str(_repo_root) not in sys.path:
+            sys.path.insert(0, str(_repo_root))
 
     import json
     import re
@@ -106,6 +164,7 @@ def _():
         pipeline_stages,
         queue_window_intervals,
     )
+    from qb_notebook.wasm_io import load_slimmed_data
 
     return (
         DEFAULT_BOT_ACTORS,
@@ -123,6 +182,7 @@ def _():
         label_intervals,
         labels_active_at,
         load_pr_interval_data,
+        load_slimmed_data,
         lognorm,
         minimize,
         nbinom,
@@ -140,16 +200,32 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _(Path, datetime, load_pr_interval_data, pl, timezone):
-    """Load parquet + join `core_user` so PRs carry `author_login`."""
-    _data_dir = Path(__file__).resolve().parents[1] / "data"
-    data = load_pr_interval_data(_data_dir)
+def _(
+    Path,
+    datetime,
+    is_wasm,
+    load_pr_interval_data,
+    load_slimmed_data,
+    mo,
+    pl,
+    timezone,
+):
+    """Load parquet + join `core_user` so PRs carry `author_login`. In WASM the
+    tables (incl. core_user) ship slimmed under public/ (see
+    scripts/export_wasm_data.py); locally they load from the raw data dir and
+    core_user is read directly off disk (not a load_pr_interval_data key)."""
+    if is_wasm:
+        data = load_slimmed_data(str(mo.notebook_location() / "public"))
+        _users = data["core_user"]
+    else:
+        _data_dir = Path(__file__).resolve().parents[1] / "data"
+        data = load_pr_interval_data(_data_dir)
+        _users = pl.read_parquet(_data_dir / "core_user.parquet")
     events = data["events"]
     prs_raw = data["prs"]
     queue_windows = data["queue_windows"]
     inline_comments = data.get("inline_comments")
 
-    _users = pl.read_parquet(_data_dir / "core_user.parquet")
     users = _users.select(
         pl.col("id").alias("author_id"),
         pl.col("github_login").alias("author_login"),
@@ -1652,6 +1728,133 @@ def _(lognorm, np, pl, plt, pr_pipeline):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
+    ### 2c. Sign-off path to RTM — MM-direct vs delegated
+
+    §2's `MM → ready-to-merge` panel pools two structurally different
+    paths: PRs whose RTM was applied directly after MM (`MM → bors r+`),
+    and PRs that picked up `delegated` along the way
+    (`MM → delegated → bors r+`, typically with the author running
+    `bors r+` themselves once delegated). Both contribute to the same
+    `seconds_maintainer_merge_to_ready_to_merge` delta because that
+    column ignores the `delegated` label.
+
+    Splitting the two:
+    - **Left:** MM → RTM duration for PRs that were *not* delegated
+      (the `bors` path in §1's Sankey).
+    - **Middle:** MM → RTM duration for PRs that *were* delegated and
+      had both MM and RTM applied. Same delta as §2's pooled panel,
+      restricted to the delegated cohort — pairs with the left panel
+      to show whether the MM→RTM clock differs by sign-off path.
+    - **Right:** delegated → RTM duration for PRs that *were*
+      delegated and reached RTM — the time from delegation to
+      `bors r+`. MM is not required (some delegated PRs skip MM
+      entirely), so this panel covers a partly different cohort.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(lognorm, np, pl, plt, pr_pipeline):
+    """Three-panel split: MM→RTM for non-delegated PRs, MM→RTM for
+    delegated PRs, and delegated→RTM for delegated PRs that reached
+    RTM. The two MM→RTM panels (left + middle) partition the cohort
+    used by §2's pooled MM→RTM panel; the right panel uses a different
+    duration entirely."""
+    _mm_rtm_not_delegated_days = (
+        pr_pipeline.filter(
+            ~pl.col("had_delegated")
+            & pl.col("seconds_maintainer_merge_to_ready_to_merge").is_not_null()
+        )
+        .select(
+            (pl.col("seconds_maintainer_merge_to_ready_to_merge") / 86400.0).alias(
+                "days"
+            )
+        )
+        .get_column("days")
+        .to_numpy()
+    )
+    _mm_rtm_delegated_days = (
+        pr_pipeline.filter(
+            pl.col("had_delegated")
+            & pl.col("seconds_maintainer_merge_to_ready_to_merge").is_not_null()
+        )
+        .select(
+            (pl.col("seconds_maintainer_merge_to_ready_to_merge") / 86400.0).alias(
+                "days"
+            )
+        )
+        .get_column("days")
+        .to_numpy()
+    )
+    _deleg_rtm_days = (
+        pr_pipeline.filter(
+            pl.col("had_delegated") & pl.col("first_ready_to_merge_at").is_not_null()
+        )
+        .with_columns(
+            (pl.col("first_ready_to_merge_at") - pl.col("first_delegated_at"))
+            .dt.total_seconds()
+            .cast(pl.Float64)
+            .alias("_secs_deleg_to_rtm")
+        )
+        .filter(pl.col("_secs_deleg_to_rtm") >= 0)
+        .select((pl.col("_secs_deleg_to_rtm") / 86400.0).alias("days"))
+        .get_column("days")
+        .to_numpy()
+    )
+
+    def _draw(
+        ax, x_days: np.ndarray, title: str, color: str, *, bins: int = 60
+    ) -> None:
+        x = x_days[x_days > 0]
+        if x.size < 5:
+            ax.set_title(f"{title} (n={x.size}, insufficient)")
+            ax.set_xscale("log")
+            return
+        lo = max(x.min(), np.nextafter(0, 1))
+        hi = x.max()
+        edges = np.logspace(np.log10(lo), np.log10(hi), bins + 1)
+        centers = np.sqrt(edges[:-1] * edges[1:])
+        counts, _ = np.histogram(x, bins=edges)
+        y_step = np.r_[counts, counts[-1]]
+        ax.step(edges, y_step, where="post", linewidth=1.2, color=color)
+        try:
+            sigma, _loc, scale = lognorm.fit(x, floc=0)
+            mu = np.log(scale)
+            cdf = lognorm.cdf(edges, s=sigma, loc=0, scale=scale)
+            expected = x.size * np.diff(cdf)
+            ax.plot(
+                centers,
+                expected,
+                color="#c63",
+                linewidth=2.0,
+                label=f"lognormal μ={mu:.2f}, σ={sigma:.2f}",
+            )
+            ax.legend(fontsize=8)
+        except Exception:  # pragma: no cover — defensive on small samples
+            pass
+        med = float(np.median(x))
+        p90 = float(np.percentile(x, 90))
+        ax.axvline(med, color="#444", linestyle="--", linewidth=0.8)
+        ax.set_xscale("log")
+        ax.set_title(f"{title}\nn={x.size}, median={med:.2f}d, p90={p90:.2f}d")
+        ax.set_xlabel("duration (days, log scale)")
+        ax.set_ylabel("PRs / log bin")
+
+    stage_signoff_fig, _axes = plt.subplots(1, 3, figsize=(16, 4))
+    _draw(_axes[0], _mm_rtm_not_delegated_days, "MM → RTM (not delegated)", "#73a946")
+    _draw(_axes[1], _mm_rtm_delegated_days, "MM → RTM (delegated)", "#4a90d9")
+    _draw(_axes[2], _deleg_rtm_days, "delegated → RTM", "#9d72c7")
+    stage_signoff_fig.suptitle(
+        "Sign-off paths to ready-to-merge: MM-direct vs delegated"
+    )
+    stage_signoff_fig.tight_layout()
+    stage_signoff_fig
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
     ## 3. Stage share of total time-to-merge
 
     For merged PRs with all 4 stages non-null, compute each PR's
@@ -1960,15 +2163,13 @@ def _(np, pl, plt, pr_pipeline):
             color="#c63",
             linewidth=1.0,
             label=(
-                f"OLS s2:  {_s2_slope:.2f} d/cycle + {_s2_int:.2f} d "
-                f"(R²={_s2_r2:.2f})"
+                f"OLS s2:  {_s2_slope:.2f} d/cycle + {_s2_int:.2f} d (R²={_s2_r2:.2f})"
             ),
         )
     _ax2.set_xlabel("queue cycles before MM")
     _ax2.set_ylabel("days (median, IQR bars)")
     _ax2.set_title(
-        f"TTM & stage 2 vs cycle count "
-        f"(buckets with n ≥ {_MIN_N_PER_BUCKET}, OLS fit)"
+        f"TTM & stage 2 vs cycle count (buckets with n ≥ {_MIN_N_PER_BUCKET}, OLS fit)"
     )
     _ax2.legend(fontsize=7)
     cycle_count_fig.tight_layout()
@@ -2511,7 +2712,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(Path, mo):
+def _(Path, is_wasm, mo):
     """Picker UI: a server-side folder browser, a run-name text input,
     and the Save button. `restrict_navigation=False` so the picker can
     point anywhere on disk; `_site/exports/` (under the repo root) is
@@ -2520,25 +2721,44 @@ def _(Path, mo):
     `save_default_base` is exported so the save cell can fall back to
     it when the user hasn't clicked a folder in the browser
     (`mo.ui.file_browser` requires an explicit click on an entry to
-    register a selection; `initial_path` alone doesn't count)."""
-    _repo_root = Path(__file__).resolve().parents[1]
-    save_default_base = _repo_root / "_site" / "exports"
-    save_default_base.mkdir(parents=True, exist_ok=True)
-    save_dir_picker = mo.ui.file_browser(
-        initial_path=save_default_base,
-        selection_mode="directory",
-        multiple=False,
-        restrict_navigation=False,
-        label=f"Base folder (pick one, or leave unselected to use {save_default_base})",
-    )
-    save_run_name = mo.ui.text(
-        value="run",
-        label="Run name (subfolder)",
-        placeholder="e.g. post-mm-default",
-        full_width=False,
-    )
-    save_btn = mo.ui.run_button(label="Save outputs", kind="success")
-    mo.vstack([save_dir_picker, save_run_name, save_btn])
+    register a selection; `initial_path` alone doesn't count).
+
+    Disabled in the WASM build: there's no filesystem to browse or write
+    to, and the Sankey→PNG path needs kaleido (no Pyodide build). Viewers
+    can right-click any figure to save it instead."""
+    if is_wasm:
+        save_btn = None
+        save_default_base = None
+        save_dir_picker = None
+        save_run_name = None
+        _ui = mo.callout(
+            mo.md(
+                "Offline figure/table export is disabled in the browser build "
+                "(no filesystem, and the Sankey PNG export needs kaleido). "
+                "Right-click any figure to save it as PNG."
+            ),
+            kind="info",
+        )
+    else:
+        _repo_root = Path(__file__).resolve().parents[1]
+        save_default_base = _repo_root / "_site" / "exports"
+        save_default_base.mkdir(parents=True, exist_ok=True)
+        save_dir_picker = mo.ui.file_browser(
+            initial_path=save_default_base,
+            selection_mode="directory",
+            multiple=False,
+            restrict_navigation=False,
+            label=f"Base folder (pick one, or leave unselected to use {save_default_base})",
+        )
+        save_run_name = mo.ui.text(
+            value="run",
+            label="Run name (subfolder)",
+            placeholder="e.g. post-mm-default",
+            full_width=False,
+        )
+        save_btn = mo.ui.run_button(label="Save outputs", kind="success")
+        _ui = mo.vstack([save_dir_picker, save_run_name, save_btn])
+    _ui
     return save_btn, save_default_base, save_dir_picker, save_run_name
 
 
@@ -2551,6 +2771,7 @@ def _(
     cycle_count_fig,
     cycle_table,
     focus_nodes,
+    is_wasm,
     json,
     make_breakdown_fig,
     make_focus_sankey_static,
@@ -2582,7 +2803,12 @@ def _(
     Plotly → PNG goes through kaleido (Chromium-backed). If that fails
     on this machine — kaleido not installed, no Chrome available, etc.
     — the Sankey falls back to self-contained HTML so the export still
-    completes."""
+    completes. Disabled entirely in the WASM build (no filesystem / no
+    kaleido); the stop below runs before any `save_btn` (None there) use."""
+    mo.stop(
+        is_wasm,
+        mo.md("_Offline export is disabled in the browser build._"),
+    )
     mo.stop(
         not save_btn.value,
         mo.md("_Pick a base folder, name the run, then click **Save outputs**._"),
