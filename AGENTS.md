@@ -30,16 +30,24 @@ This file gives coding agents repo-specific guidance for `qb-notebook`.
   - `uv run pytest`
 - Run a single test file:
   - `uv run pytest tests/test_intervals.py`
-- Lint:
+- Lint (matches CI exactly — run before pushing):
   - `uv run ruff check .`
-- CI lint target:
-  - `uv run ruff check qb_notebook tests download_artifact.py`
 - Format:
   - `uv run ruff format .`
-- Format check (all Python files):
+- Format check (matches CI exactly — run before pushing):
   - `uv run ruff format --check .`
-- CI format check:
-  - `uv run ruff format --check qb_notebook tests download_artifact.py`
+
+CI (`.github/workflows/ci.yml`, the `Ruff` job) runs **both** of these
+repo-wide commands over the *entire* tree — not just `qb_notebook/`,
+`tests/`, and `download_artifact.py`. That sweep includes the `marimo/*.py`
+notebooks and the Jupyter `*.ipynb` notebooks (ruff formats notebook cells
+by default). Scoping a local check to a subset of paths can pass while CI
+fails, so always run the bare `.` form above before pushing.
+
+Gotcha: the `Ruff` job runs `ruff check .` *before* `ruff format --check .`,
+and a failed step aborts the job — so a lint error masks any pending format
+failure in the CI log. After fixing a lint error, run the format check too;
+the next CI run will reach it.
 
 ## Upstream Data Source
 
