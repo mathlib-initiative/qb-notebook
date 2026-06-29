@@ -5,20 +5,25 @@ This file gives coding agents repo-specific guidance for `qb-notebook`.
 ## Project Overview
 
 - Language: Python (>= 3.10)
-- Package layout: `qb_notebook/` (modules: `artifacts`, `data_io`, `filters`,
-  `intervals`, `plotting`, `generate_plot_site`)
+- Package layout: `qb_notebook/` — data/IO + plotting helpers (`artifacts`,
+  `data_io`, `filters`, `intervals`, `plotting`, `generate_plot_site`,
+  `wasm_io`) plus the review-analysis helpers (`review_states`, `pr_shape`,
+  `teams`, `temporal`, `assignments`)
 - Main data shape: parquet files under `data/`, produced upstream by
   [`queueboard-core`](https://github.com/leanprover-community/queueboard-core)
   (see "Upstream data source" below).
 - Main usage modes:
   - library-style helpers (`qb_notebook.data_io`, `qb_notebook.filters`,
-    `qb_notebook.intervals`, `qb_notebook.plotting`,
-    `qb_notebook.review_states`)
+    `qb_notebook.intervals`, `qb_notebook.plotting`, plus the
+    review-analysis helpers `qb_notebook.review_states`, `pr_shape`,
+    `teams`, `temporal`, `assignments`)
   - notebook exploration:
     - Jupyter (`.ipynb`): `pr_merge_throughput`, `pr_open_durations`,
       `queue_windows`
     - marimo (`marimo/*.py`): reactive notebooks for the review-analysis
-      themes (see `docs/review-analysis-plan.md`)
+      project (reader's guide:
+      `docs/review-analysis/notebooks.md`; background:
+      `docs/review-analysis-plan.md`)
   - static plot generation (`qb_notebook/generate_plot_site.py`)
 
 ## Environment and Tooling

@@ -141,11 +141,23 @@ Cross-cutting helpers already in place:
 - `qb_notebook.data_io.load_pr_interval_data` — canonical parquet
   loader; extend this rather than duplicating the parse-and-cast logic.
 - `qb_notebook.intervals` — generic interval-overlap utilities.
-- `qb_notebook.review_states` — label-interval reconstruction used by
-  Themes 1, 3, 4, 5.
+- `qb_notebook.review_states` — label-interval reconstruction,
+  trigger attribution, first-touch / inline-comment / pipeline-stage
+  helpers used across the review-analysis notebooks.
+- `qb_notebook.pr_shape` — per-PR shape decorators (size / author
+  cohort / draft / PR type).
+- `qb_notebook.temporal` — UTC time-of-day / weekday / seasonality
+  decorators and per-actor activity windows.
+- `qb_notebook.assignments` — assignment / review-request event
+  classification and policy-outcome helpers.
 - `qb_notebook.teams` — YAML loader for reviewer / maintainer team
   membership (needs a sibling `leanprover-community.github.io`
   checkout).
+
+See [`docs/review-analysis/notebooks.md`](../docs/review-analysis/notebooks.md)
+for which notebook uses what, and the plan index's
+[helper inventory](../docs/review-analysis-plan.md#cross-cutting-infrastructure)
+for signatures.
 
 ## Team-membership loader
 

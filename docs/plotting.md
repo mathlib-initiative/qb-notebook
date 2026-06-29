@@ -62,7 +62,7 @@ PR durations across this repo (open-to-close, open-to-merge, per-stage
 deltas) are close to **log-normally distributed** — the original
 analysis is in `pr_open_durations.ipynb`, which fits lognormal /
 Weibull / log-logistic curves on geometric-spaced bins. The convention
-adopted across the marimo notebooks (Session 15 onward) is:
+adopted across the marimo notebooks is:
 
 - Bin edges via `np.logspace(np.log10(lo), np.log10(hi), bins + 1)`
   with `lo = max(x.min(), nextafter(0, 1))` and `hi = x.max()`. Bin

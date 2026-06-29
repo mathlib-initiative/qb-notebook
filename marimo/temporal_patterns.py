@@ -927,8 +927,8 @@ def _(mo):
     mo.md("""
     ## Notes
 
-    Empirical findings on the current artifact live in
-    `docs/review-analysis/sessions.md` under Session 14. The
+    Headline findings are summarized in
+    `docs/review-analysis/notebooks.md`. The
     helper module `qb_notebook/temporal.py` (`with_temporal_columns`,
     `weekday_hour_histogram`, `actor_activity_window`,
     `hour_set_overlap`) is reusable from any other notebook that

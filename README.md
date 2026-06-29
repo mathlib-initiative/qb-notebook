@@ -25,9 +25,18 @@ that artifact down for offline analysis.
 
 ## Notebooks
 
+Jupyter (`.ipynb`):
+
 - `pr_merge_throughput.ipynb` — daily/14-day-avg PR merge throughput.
 - `pr_open_durations.ipynb` — distributions of PR open durations.
 - `queue_windows.ipynb` — review-queue window timeseries and age quantiles.
+
+marimo (`marimo/*.py`) — a suite of reactive notebooks analyzing
+mathlib4's review process (reviewer load, bottlenecks, area health, PR
+shape, lifecycle, and more). See the reader's guide at
+[`docs/review-analysis/notebooks.md`](docs/review-analysis/notebooks.md)
+for what each one answers, and [`marimo/AGENTS.md`](marimo/AGENTS.md) for
+how to run them.
 
 ## Refreshing the parquet data
 
@@ -56,7 +65,8 @@ the same function, kept so older notebooks that imported it still work.
 from qb_notebook.data_io import load_pr_interval_data
 
 tables = load_pr_interval_data("data")
-# keys: prs, events, label_defs, prlabel, queue_windows, check_runs, status_contexts
+# keys: prs, events, label_defs, prlabel, queue_windows, check_runs,
+#       status_contexts (+ inline_comments when present in the artifact)
 ```
 
 `load_pr_interval_data` parses the queueboard datetime columns into UTC

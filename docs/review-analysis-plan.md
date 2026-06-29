@@ -8,14 +8,11 @@ health. Each theme is scoped to be buildable in its own session.
 ## How this doc is organized
 
 - **This file** (`docs/review-analysis-plan.md`) is the index: project
-  background, data caveats, key labels, the cross-cutting helper
-  inventory, and the master roadmap.
-- [`review-analysis/themes.md`](review-analysis/themes.md) — the five
-  original themes (state machine, reviewer load, bottlenecks, area
-  health, PR shape), all shipped. Historical record + design notes.
-- [`review-analysis/sessions.md`](review-analysis/sessions.md) —
-  follow-up sessions (Sessions 6+: cleanups, cross-cuts, gap fills).
-  Append-only as new sessions ship.
+  background, data caveats, key labels, and the cross-cutting helper
+  inventory.
+- [`review-analysis/notebooks.md`](review-analysis/notebooks.md) — the
+  reader's guide to the shipped notebooks: what each one answers, its
+  headline findings, and the helpers it's built on.
 - [`review-analysis/backlog.md`](review-analysis/backlog.md) — the
   prioritized backlog of remaining gaps and synthesis stories.
   **Read this first when picking up new work.**
@@ -98,39 +95,32 @@ implementing each theme.
 
 ## Cross-cutting infrastructure
 
-These keep showing up in multiple themes and should be implemented once:
+These are used across multiple notebooks. All are shipped and live in
+`qb_notebook/`; each notebook's [guide entry](review-analysis/notebooks.md)
+lists which it leans on.
 
 - **`label_intervals(events, pr_id, label_name) -> [(start, end, actor)]`** —
   reconstruct intervals when a label was applied, including actor on
-  apply/remove. Lives in `qb_notebook/review_states.py`. Used by
-  Themes 1, 3, 4, 5. ✅ shipped.
+  apply/remove. Lives in `qb_notebook/review_states.py`.
 - **`label_overlap_seconds(intervals, windows) -> windows + overlap_seconds + had_overlap`** —
   generic per-PR interval-vs-window overlap. Given the output of
   `label_intervals` for one label and a per-PR window frame, sums
   intersections in seconds and adds a `had_overlap` flag. Lives in
-  `qb_notebook/review_states.py`. Used by Themes 3 and 4 (per-area
-  reviewer-court latency); ready for Theme 5 wherever a "did label X
-  happen during interval Y" question comes up. ✅ shipped.
+  `qb_notebook/review_states.py`.
 - **`labels_active_at(intervals, points) -> points + label_name`** —
   for each `(pull_request_id, timestamp)` point in `points`, return one
   row per label interval active at that time (half-open
   `[start, end_effective)`). Points with no active interval drop out;
   points with multiple matching labels emit one row each (count-each
-  semantics). Lives in `qb_notebook/review_states.py`. Used by Theme 4
-  to attribute merges and reviewer triggers to active `t-*` areas;
-  ready for Theme 5 for "which area was the PR in when X happened"
-  size/contributor cuts. ✅ shipped.
+  semantics). Lives in `qb_notebook/review_states.py`.
 - **`teams.load(repo_path) -> {reviewers, maintainers, admins, ...: set[login]}`** —
   parse `data/people.yaml` + `data/teams.yaml` from a checkout of
   `leanprover-community.github.io` and return sets of GitHub logins per
-  team. Should warn (not error) on team members missing from
-  `people.yaml`. Likely lives in `qb_notebook/teams.py`. Used by
-  Themes 2, 4. Probably also expose a CLI entry point
+  team. Warns (does not error) on team members missing from
+  `people.yaml`. Lives in `qb_notebook/teams.py`. A CLI entry point
   (`python -m qb_notebook.teams --repo ../leanprover-community.github.io`)
-  that dumps a JSON snapshot, so notebooks don't need the sibling
-  checkout at runtime.
-- **`actor_counts(events, label_name, freq='1mo')`** — group LABELED
-  events by actor and time bucket. Used by Themes 2, 4.
+  dumps a JSON snapshot, so notebooks don't need the sibling checkout at
+  runtime.
 - **`first_review_touch(df_prs, df_events, *, event_types, bot_actors)`** —
   per-PR earliest non-author, non-bot review/comment event. Returns
   one row per PR with `first_touch_at` / `first_touch_actor` /
@@ -140,9 +130,7 @@ These keep showing up in multiple themes and should be implemented once:
   upstream — `load_pr_interval_data` already casts `author_id` to
   `Int64` for that join). Default `event_types` covers `REVIEW_*` +
   `ISSUE_COMMENTED`; pass a stricter tuple for a "substantive review"
-  variant. Lives in `qb_notebook/review_states.py`. Used by Session 11
-  (first-touch latency cells in `marimo/reviewer_load.py`); ready for
-  Stories A (anatomy-of-a-merge) and D (newcomer experience). ✅ shipped.
+  variant. Lives in `qb_notebook/review_states.py`.
 - **`reviewers_court_intervals(events, queue_windows, *, asof, label_asof)`** —
   unified per-PR "in reviewers' court" intervals. Per-PR, queue-window
   (ruleset 3) is primary; `awaiting-review` label intervals fall back
@@ -153,8 +141,7 @@ These keep showing up in multiple themes and should be implemented once:
   `label_asof` parameter clamps label-source intervals to a retirement
   date (mathlib: `datetime(2024, 7, 10, UTC)`) since label deletion
   doesn't emit `UNLABELED` events. Lives in
-  `qb_notebook/review_states.py`. Reused by Themes 2, 4, and 5.
-  ✅ shipped.
+  `qb_notebook/review_states.py`.
 - **`pipeline_stages(df_prs, df_events, *, asof=None, pr_merged_col="merged_at", ...)`** —
   per-PR five-stage milestone frame: `opened_at`, `first_touch_at`,
   `first_maintainer_merge_at`, `first_ready_to_merge_at`,
@@ -168,10 +155,7 @@ These keep showing up in multiple themes and should be implemented once:
   than going negative so log-scale plots stay clean. Caller supplies
   the bors-aware merge timestamp (typically via
   `pl.when(expr_merged_to_master()).then(expr_merged_at_effective()).otherwise(None)`
-  upstream). Lives in `qb_notebook/review_states.py`. Used by
-  Session 15 (`marimo/anatomy_of_a_merge.py`); ready for Story B
-  (latency decomposition) and Story F (bors queue health) which
-  need the same milestone backbone. ✅ shipped.
+  upstream). Lives in `qb_notebook/review_states.py`.
 - **`inline_comment_stats(df_inline, df_prs, *, bot_actors)`** —
   per-PR rollup of `syncer_prreviewinlinecomment` rows: total
   comments, comments-by-others (author + bots excluded — the
@@ -184,10 +168,6 @@ These keep showing up in multiple themes and should be implemented once:
   `author_login` (join `core_user.github_login` upstream); author
   comparison is case-insensitive. PRs with no inline comments are
   absent from the output. Lives in `qb_notebook/review_states.py`.
-  Used by Session 12 (Section 9 of `bottleneck_localization.py`);
-  ready for Stories A (anatomy of a merge — n_inline_files is a
-  diff-coverage proxy) and C (anatomy of a stuck PR — same cuts on
-  open / closed-unmerged cohorts). ✅ shipped.
 - **Temporal helpers in `qb_notebook/temporal.py`** —
   `with_temporal_columns(df, ts_col, *, prefix="")` adds UTC
   `hour_utc` / `weekday` (0=Mon, 6=Sun) / `is_weekend` / `month` /
@@ -200,9 +180,6 @@ These keep showing up in multiple themes and should be implemented once:
   `active_hours: list[int]`, `active_hours_share`); and
   `hour_set_overlap(a, b)` is the trivial pairwise comparator.
   Plus `WEEKDAY_LABELS` / `MONTH_LABELS` / `WEEKEND_DAYS` constants.
-  Used by Session 14 (`marimo/temporal_patterns.py`); ready for
-  Story B (latency decomposition — when do queue-stalls cluster?)
-  and any future seasonality cut on Themes 2-5. ✅ shipped.
 - **PR-shape helpers in `qb_notebook/pr_shape.py`** —
   `size_buckets(df_prs)` adds `lines_changed` / `lines_bucket` /
   `files_bucket`; `author_cohort(df_prs)` adds `author_first_pr_at` /
@@ -213,40 +190,17 @@ These keep showing up in multiple themes and should be implemented once:
   stripped, `feature`/`docs` aliased, non-canonical → `other`, no
   prefix → `unparsed`). `bucket_labels(breaks)` exposes size-axis
   ordering and `pr_type_order()` exposes type-axis ordering for plots.
-  Used by Theme 5; ready for plot-site polish (Session 6) wherever
-  shape cuts come up. ✅ shipped.
 
 A nice-to-have upstream change: an explicit `queueboard-core`
 ruleset preserving the original `awaiting-review` semantics, so the
 choice of ruleset_id encodes "court" rather than living in helper
 code.
 
-## Roadmap
+## Status
 
-| Session | Theme                            | Deliverable                                                     | Status   |
-| ------- | -------------------------------- | --------------------------------------------------------------- | -------- |
-| 1       | Theme 1: state machine (labels)  | `marimo/review_state_machine.py` + `review_states.py`           | shipped  |
-| 2       | Theme 2: reviewer load           | `marimo/reviewer_load.py` + `qb_notebook/teams.py`              | shipped  |
-| 3       | Theme 3: bottlenecks             | `marimo/bottleneck_localization.py`                             | shipped  |
-| 3.5     | Theme 1 companion (queue)        | `marimo/queue_window_state.py` + `queue_window_intervals`       | shipped  |
-| 4       | Theme 4: area health             | `marimo/area_health.py` + `labels_active_at`                    | shipped  |
-| 5       | Theme 5: PR shape                | `marimo/pr_shape_effects.py` + `qb_notebook/pr_shape.py`        | shipped  |
-| 6       | Cleanup: boilerplate             | `merged_prs_frame`, label/window constants, `expr_is_draft` fix | shipped  |
-| 7       | Theme 4: team × area matrix      | team annotation on reviewer × area matrix in `area_health.py`   | shipped  |
-| 8       | Cross-cuts: shape × area         | Theme 1/3 sojourn & stall signals × `pr_type` / `lines_bucket`  | shipped  |
-| 9       | Theme 2/5: tier + WIP follow-ups | active-reviewer trend by team; `had_wip_label_at_open` cut      | shipped  |
-| 10      | Plot-site polish                 | promote best plots from each notebook                           | planned  |
-| 11      | Gap: first-touch latency         | `first_review_touch` helper + section in `reviewer_load.py`     | shipped  |
-| 12      | Gap: inline-comment depth        | `inline_comment_stats` helper + §9 in `bottleneck_localization.py` | shipped |
-| 13      | Gap: delegated-merge path        | §8 in `review_state_machine.py` + `DEFAULT_BOT_ACTORS` bot-list fix | shipped |
-| 14      | Gap: time-of-day / seasonality   | `marimo/temporal_patterns.py` + `qb_notebook/temporal.py`       | shipped  |
-| 15      | Story A: anatomy of a merge      | `marimo/anatomy_of_a_merge.py` + `pipeline_stages` helper       | shipped  |
-| 16+     | Gaps & stories                   | see [backlog](review-analysis/backlog.md)                       | planned  |
-
-Order is flexible — Themes 1 and 2 were the highest-value starting points;
-the post-Theme-5 sessions (6+) are cleanups and cross-cuts unlocked by the
-shipped helpers. Sessions 11+ ship gaps autonomously and pause for
-review after each story; full session detail lives in
-[`review-analysis/sessions.md`](review-analysis/sessions.md) and the
-prioritized future work lives in
-[`review-analysis/backlog.md`](review-analysis/backlog.md).
+The nine notebooks in the [notebook guide](review-analysis/notebooks.md)
+are shipped, along with the helper inventory above and one plot-site-polish
+item still planned. Remaining gaps and synthesis stories are tracked in
+[`backlog.md`](review-analysis/backlog.md): gaps ship autonomously, and
+synthesis stories pause for review on completion. Per-session provenance
+lives in git history.

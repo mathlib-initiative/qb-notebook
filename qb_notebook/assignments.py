@@ -24,7 +24,7 @@ review-request stream:
   :func:`qb_notebook.review_states.attribute_label_events`) to measure
   conformance to the "assignee sees the PR through to maintainer-merge"
   policy. Resolution is *any assignee ever* — see the
-  ``review-analysis-plan`` design notes for the rationale.
+  ``request_effectiveness`` notebook (§3) for the rationale.
 """
 
 from __future__ import annotations
