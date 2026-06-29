@@ -7,6 +7,8 @@ from typing import Iterable
 
 import polars as pl
 
+from qb_notebook.filters import expr_merged_at_effective, expr_merged_to_master
+
 # FK columns on analyzer_prqueuewindow that Django exports as Float64
 # (nullable integer columns come out as float in pandas/parquet exports).
 _QUEUE_WINDOW_FK_COLS: tuple[str, ...] = (
@@ -17,6 +19,11 @@ _QUEUE_WINDOW_FK_COLS: tuple[str, ...] = (
     "closed_by_status_context_id",
     "closed_by_timeline_event_id",
 )
+
+# FK columns on syncer_pullrequest that arrive as Float64 for the same
+# nullable-bigint reason. Cast at load time so notebooks can join against
+# `core_user.id` (Int64) without each one re-casting.
+_PR_FK_COLS: tuple[str, ...] = ("author_id",)
 
 # `%#z` parses offsets like +00:00 in the current Polars/chrono combo.
 _DEFAULT_DATETIME_FORMAT = "%Y-%m-%d %T%.f%#z"
@@ -106,14 +113,27 @@ def load_pr_interval_data(data_dir: str | Path = "data") -> dict[str, pl.DataFra
     - syncer_commitcheckrun.parquet
     - syncer_commitstatuscontext.parquet
 
+    Optional (loaded if present; omitted from the result dict otherwise):
+    - syncer_prreviewinlinecomment.parquet → key ``inline_comments``
+
     The ``queue_windows`` frame has its FK columns cast from Float64 to Int64
-    (nullable integers are exported as float by the Django/parquet pipeline).
+    (nullable integers are exported as float by the Django/parquet pipeline);
+    ``prs.author_id`` is cast for the same reason so it joins against
+    ``core_user.id`` directly.
+
+    ``events`` includes the post-2026-05 timeline event types
+    (``ISSUE_COMMENTED``, ``REVIEW_APPROVED``, ``REVIEW_COMMENTED``,
+    ``REVIEW_CHANGES_REQUESTED``, ``REVIEW_DISMISSED``,
+    ``REVIEW_REQUESTED``, ``REVIEW_REQUEST_REMOVED``) alongside the older
+    ``LABELED`` / ``UNLABELED`` / ``CLOSED`` / etc.
     """
     root = Path(data_dir)
     qw_raw = _read_and_parse(root / "analyzer_prqueuewindow.parquet")
     qw = _cast_float_to_nullable_int(qw_raw, _QUEUE_WINDOW_FK_COLS)
-    return {
-        "prs": _read_and_parse(root / "syncer_pullrequest.parquet"),
+    prs_raw = _read_and_parse(root / "syncer_pullrequest.parquet")
+    prs = _cast_float_to_nullable_int(prs_raw, _PR_FK_COLS)
+    out: dict[str, pl.DataFrame] = {
+        "prs": prs,
         "events": _read_and_parse(root / "syncer_prtimelineevent.parquet"),
         "label_defs": _read_and_parse(root / "syncer_labeldef.parquet"),
         "prlabel": _read_and_parse(root / "syncer_prlabel.parquet"),
@@ -121,6 +141,12 @@ def load_pr_interval_data(data_dir: str | Path = "data") -> dict[str, pl.DataFra
         "check_runs": _read_and_parse(root / "syncer_commitcheckrun.parquet"),
         "status_contexts": _read_and_parse(root / "syncer_commitstatuscontext.parquet"),
     }
+    inline_path = root / "syncer_prreviewinlinecomment.parquet"
+    if inline_path.exists():
+        # gh_created_at is the GitHub-side timestamp; add it to the parse list
+        # for this table only (the default tuple already covers it).
+        out["inline_comments"] = _read_and_parse(inline_path)
+    return out
 
 
 @dataclass
@@ -166,6 +192,31 @@ def load_contributor_config(path: str | Path) -> list[ContributorEntry]:
         )
         for entry in data
     ]
+
+
+def merged_prs_frame(
+    prs: pl.DataFrame,
+    *,
+    effective_col: str = "merged_at_effective",
+) -> pl.DataFrame:
+    """PRs filtered to merged-to-master, with the bors-aware effective merge
+    timestamp added as ``effective_col``.
+
+    `prs.merged_at` is null for the vast majority of mathlib merges (bors
+    closes PRs after pushing to master rather than using GitHub's merge
+    flow). This helper combines :func:`~qb_notebook.filters.expr_merged_to_master`
+    and :func:`~qb_notebook.filters.expr_merged_at_effective` into the
+    canonical derived frame that downstream analyses join against.
+
+    The default ``effective_col="merged_at_effective"`` matches the
+    "preserve `prs.merged_at` alongside the bors fallback" style used by
+    `marimo/queue_window_state.py` and `marimo/review_state_machine.py`.
+    Pass ``effective_col="merged_at"`` to overwrite-style frames (e.g.
+    `marimo/area_health.py`, `marimo/pr_shape_effects.py`).
+    """
+    return prs.filter(expr_merged_to_master()).with_columns(
+        expr_merged_at_effective().alias(effective_col)
+    )
 
 
 def split_queue_windows_by_rule(

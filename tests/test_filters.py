@@ -6,6 +6,9 @@ from qb_notebook.filters import (
     expr_closed_by_event_type,
     expr_commenters_include_any,
     expr_interval_started_between,
+    expr_is_draft,
+    expr_merged_at_effective,
+    expr_merged_to_master,
     expr_opened_by_event_type,
     expr_repo_in,
     expr_title_regex,
@@ -156,3 +159,106 @@ def test_expr_opened_by_event_type_custom_col() -> None:
     df = pl.DataFrame({"id": [1, 2], "etype": ["CI_PASSED", "PR_OPENED"]})
     out = df.filter(expr_opened_by_event_type(["PR_OPENED"], event_type_col="etype"))
     assert out["id"].to_list() == [2]
+
+
+def _merge_fixture() -> pl.DataFrame:
+    """Six representative PRs covering the bors / GitHub / collateral cases."""
+    return pl.DataFrame(
+        {
+            "id": [1, 2, 3, 4, 5, 6],
+            "base_ref_name": [
+                "master",  # bors-merged to master
+                "bump/v4.21.0",  # bors-merged to a release branch
+                "master",  # GitHub-merged to master
+                "master",  # bors closed it (branch deletion) but not a merge
+                "master",  # still open
+                "master",  # genuinely abandoned
+            ],
+            "state": ["closed", "closed", "merged", "closed", "open", "closed"],
+            "title": [
+                "[Merged by Bors] - feat: foo",
+                "[Merged by Bors] - chore: bump",
+                "feat: direct merge",
+                "feat: collateral closure",
+                "feat: still open",
+                "feat: abandoned",
+            ],
+            "merged_at": [
+                None,
+                None,
+                datetime(2025, 3, 1, tzinfo=timezone.utc),
+                None,
+                None,
+                None,
+            ],
+            "closed_at": [
+                datetime(2025, 4, 1, tzinfo=timezone.utc),
+                datetime(2025, 4, 2, tzinfo=timezone.utc),
+                datetime(2025, 3, 1, tzinfo=timezone.utc),
+                datetime(2025, 4, 3, tzinfo=timezone.utc),
+                None,
+                datetime(2025, 4, 4, tzinfo=timezone.utc),
+            ],
+        }
+    )
+
+
+def test_expr_merged_to_master_matches_bors_and_github() -> None:
+    df = _merge_fixture()
+    out = df.filter(expr_merged_to_master()).sort("id")
+    assert out["id"].to_list() == [1, 3]
+
+
+def test_expr_merged_to_master_excludes_non_master_branches() -> None:
+    df = _merge_fixture()
+    out = df.filter(expr_merged_to_master())
+    assert 2 not in out["id"].to_list()  # bors-merged but bump/v4.21.0
+
+
+def test_expr_merged_to_master_excludes_collateral_closures() -> None:
+    df = _merge_fixture()
+    out = df.filter(expr_merged_to_master())
+    # PR 4 was closed by bors as branch-deletion collateral; no title rewrite.
+    assert 4 not in out["id"].to_list()
+
+
+def test_expr_merged_to_master_excludes_open_and_abandoned() -> None:
+    df = _merge_fixture()
+    out = df.filter(expr_merged_to_master())
+    assert 5 not in out["id"].to_list()
+    assert 6 not in out["id"].to_list()
+
+
+def test_expr_merged_to_master_respects_custom_base_branch() -> None:
+    df = _merge_fixture()
+    out = df.filter(expr_merged_to_master(base_branch="bump/v4.21.0"))
+    assert out["id"].to_list() == [2]
+
+
+def test_expr_is_draft_matches_postgres_string_default() -> None:
+    df = pl.DataFrame({"id": [1, 2, 3], "is_draft": ["t", "f", "t"]})
+    out = df.filter(expr_is_draft()).sort("id")
+    assert out["id"].to_list() == [1, 3]
+
+
+def test_expr_is_draft_negation_on_string_column() -> None:
+    df = pl.DataFrame({"id": [1, 2, 3], "is_draft": ["t", "f", "t"]})
+    out = df.filter(expr_is_draft(is_draft=False))
+    assert out["id"].to_list() == [2]
+
+
+def test_expr_is_draft_accepts_bool_override() -> None:
+    df = pl.DataFrame({"id": [1, 2, 3], "is_draft": [True, False, True]})
+    out = df.filter(expr_is_draft(draft_true=True)).sort("id")
+    assert out["id"].to_list() == [1, 3]
+
+
+def test_expr_merged_at_effective_prefers_merged_at() -> None:
+    df = _merge_fixture().filter(expr_merged_to_master())
+    out = df.with_columns(expr_merged_at_effective().alias("merge_ts")).sort("id")
+    # PR 1 is bors-merged (merged_at null → fall back to closed_at);
+    # PR 3 is GitHub-merged (merged_at populated).
+    assert out["merge_ts"].to_list() == [
+        datetime(2025, 4, 1, tzinfo=timezone.utc),
+        datetime(2025, 3, 1, tzinfo=timezone.utc),
+    ]
