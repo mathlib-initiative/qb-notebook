@@ -41,8 +41,20 @@ async def _(mo):
         # build). pyarrow is needed because marimo patches pl.read_parquet to
         # route through it in WASM (qb_notebook.wasm_io reads the slimmed
         # parquet). pyyaml backs qb_notebook.teams.
+        # tzdata: Pyodide ships no system zoneinfo database, so materializing
+        # tz-aware datetimes (e.g. `.to_dicts()` on a UTC column) raises
+        # ZoneInfoNotFoundError until this is installed.
         _ = await _micropip.install(
-            ["polars", "pandas", "numpy", "pyarrow", "matplotlib", "scipy", "pyyaml"]
+            [
+                "polars",
+                "pandas",
+                "numpy",
+                "pyarrow",
+                "matplotlib",
+                "scipy",
+                "pyyaml",
+                "tzdata",
+            ]
         )
         _wheel = (
             mo.notebook_location() / "public" / "qb_notebook-0.1.0-py3-none-any.whl"
@@ -83,7 +95,7 @@ def _(is_wasm):
         if str(_repo_root) not in sys.path:
             sys.path.insert(0, str(_repo_root))
 
-    from datetime import datetime, timedelta, timezone
+    from datetime import timedelta, timezone
 
     import matplotlib.pyplot as plt
     import numpy as np
@@ -104,7 +116,6 @@ def _(is_wasm):
     return (
         Path,
         attribute_label_events,
-        datetime,
         label_intervals,
         label_overlap_seconds,
         labels_active_at,
@@ -126,12 +137,10 @@ def _(is_wasm):
 @app.cell
 def _(
     Path,
-    datetime,
     is_wasm,
     load_pr_interval_data,
     load_slimmed_data,
     mo,
-    timezone,
 ):
     if is_wasm:
         # Slimmed per-notebook parquet shipped under the site's public/ folder
@@ -145,7 +154,14 @@ def _(
     label_defs = data["label_defs"]
     prlabel = data["prlabel"]
     queue_windows = data["queue_windows"]
-    asof = datetime.now(tz=timezone.utc)
+    # `asof` is the artifact snapshot time — the latest moment any table
+    # observed state — NOT wall-clock now(). These notebooks (especially the
+    # frozen WASM export) read a static snapshot, so a live clock drifts past
+    # the last data point and empties every "last N days" window: §5's 30d/60d
+    # coverage pivot then loses a bucket column and raises StopIteration. Per
+    # AGENTS.md, anchor relative windows to max(date). `events.occurred_at` is
+    # the latest column that survives slimming and bounds every other ts here.
+    asof = events["occurred_at"].max()
     return asof, events, label_defs, prlabel, prs, queue_windows
 
 
@@ -752,32 +768,23 @@ def _(cutoff_30, cutoff_60, mo, pl, reviewer_area):
         .otherwise(pl.lit(None))
         .alias("bucket")
     ).filter(pl.col("bucket").is_not_null())
-    bucket_counts = (
-        bucketed.group_by(["area", "bucket"])
-        .agg(
-            [
-                pl.len().alias("triggers"),
-                pl.col("reviewer").n_unique().alias("reviewers"),
-            ]
-        )
-        .pivot(on="bucket", index="area", values=["triggers", "reviewers"])
-        .fill_null(0)
-    )
-    # Defensive: pivot column naming differs slightly across polars versions.
-    # Resolve the four output columns by inspection.
-    _cols = bucket_counts.columns
-    _t_last = next(c for c in _cols if c.startswith("triggers") and "last" in c)
-    _t_prior = next(c for c in _cols if c.startswith("triggers") and "prior" in c)
-    _r_last = next(c for c in _cols if c.startswith("reviewers") and "last" in c)
-    _r_prior = next(c for c in _cols if c.startswith("reviewers") and "prior" in c)
+    # Conditional aggregation rather than `.pivot(...)`: a pivot omits the
+    # column for a bucket with zero rows (e.g. a quiet last-30d window), so a
+    # name/position-based lookup of the pivoted columns raises StopIteration.
+    # Per-area filtered counts always yield all four columns (0 where a bucket
+    # is empty) and don't depend on polars' cross-version pivot naming.
+    _is_last = pl.col("bucket") == "last_30d"
+    _is_prior = pl.col("bucket") == "prior_30d"
     coverage = (
-        bucket_counts.rename(
-            {
-                _t_last: "triggers_last_30d",
-                _t_prior: "triggers_prior_30d",
-                _r_last: "reviewers_last_30d",
-                _r_prior: "reviewers_prior_30d",
-            }
+        bucketed.group_by("area")
+        .agg(
+            pl.col("bucket").filter(_is_last).count().alias("triggers_last_30d"),
+            pl.col("bucket").filter(_is_prior).count().alias("triggers_prior_30d"),
+            pl.col("reviewer").filter(_is_last).n_unique().alias("reviewers_last_30d"),
+            pl.col("reviewer")
+            .filter(_is_prior)
+            .n_unique()
+            .alias("reviewers_prior_30d"),
         )
         .with_columns(
             pl.when(pl.col("triggers_prior_30d") > 0)

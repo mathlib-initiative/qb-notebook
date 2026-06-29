@@ -41,8 +41,20 @@ async def _(mo):
         # build). pyarrow is needed because marimo patches pl.read_parquet to
         # route through it in WASM (qb_notebook.wasm_io reads the slimmed
         # parquet).
+        # tzdata: Pyodide ships no system zoneinfo database, so materializing
+        # tz-aware datetimes (e.g. `.to_dicts()` on a UTC column) raises
+        # ZoneInfoNotFoundError until this is installed.
         _ = await _micropip.install(
-            ["polars", "pandas", "numpy", "pyarrow", "matplotlib", "scipy", "pyyaml"]
+            [
+                "polars",
+                "pandas",
+                "numpy",
+                "pyarrow",
+                "matplotlib",
+                "scipy",
+                "pyyaml",
+                "tzdata",
+            ]
         )
         _wheel = (
             mo.notebook_location() / "public" / "qb_notebook-0.1.0-py3-none-any.whl"
@@ -96,7 +108,7 @@ def _(is_wasm):
         if str(_repo_root) not in sys.path:
             sys.path.insert(0, str(_repo_root))
 
-    from datetime import datetime, timezone
+    from datetime import timezone
 
     import matplotlib.pyplot as plt
     import numpy as np
@@ -129,7 +141,6 @@ def _(is_wasm):
         attribute_label_events,
         author_cohort,
         bucket_labels,
-        datetime,
         expr_merged_to_master,
         had_wip_label_at_open,
         load_pr_interval_data,
@@ -149,12 +160,10 @@ def _(is_wasm):
 @app.cell
 def _(
     Path,
-    datetime,
     is_wasm,
     load_pr_interval_data,
     load_slimmed_data,
     mo,
-    timezone,
 ):
     if is_wasm:
         # Slimmed per-notebook parquet shipped under the site's public/ folder
@@ -166,7 +175,12 @@ def _(
     prs_raw = data["prs"]
     events = data["events"]
     queue_windows = data["queue_windows"]
-    asof = datetime.now(tz=timezone.utc)
+    # Snapshot time, not wall-clock now(): these notebooks read a frozen data
+    # snapshot (especially the WASM export), so anchoring relative windows to a
+    # live clock drifts past the last observed event and empties every "last N
+    # days" window. `events.occurred_at` is the latest column surviving slimming
+    # and bounds the other timestamps. Per AGENTS.md, anchor windows to max(date).
+    asof = events["occurred_at"].max()
     return asof, events, prs_raw, queue_windows
 
 

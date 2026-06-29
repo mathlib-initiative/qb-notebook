@@ -43,6 +43,9 @@ async def _(mo):
         # parquet). plotly backs the lifecycle Sankey (pure-Python wheel;
         # kaleido — its PNG-export backend — has no Pyodide build, so the
         # offline export cells are guarded behind `not is_wasm` below).
+        # tzdata: Pyodide ships no system zoneinfo database, so any
+        # materialization of tz-aware datetimes (e.g. `.to_dicts()` on a
+        # UTC column) raises ZoneInfoNotFoundError until this is installed.
         _ = await _micropip.install(
             [
                 "polars",
@@ -53,6 +56,7 @@ async def _(mo):
                 "scipy",
                 "pyyaml",
                 "plotly",
+                "tzdata",
             ]
         )
         _wheel = (
@@ -133,9 +137,13 @@ def _(is_wasm):
 
     import plotly.io as pio
 
-    pio.renderers[pio.renderers.default].config = {
-        "toImageButtonOptions": {"format": "png", "scale": 3}
-    }
+    # The Pyodide/WASM runtime has no default plotly renderer, so
+    # `pio.renderers.default` is "" and `pio.renderers[""]` raises KeyError.
+    # The modebar PNG-scale tweak only applies to the local kernel anyway.
+    if pio.renderers.default:
+        pio.renderers[pio.renderers.default].config = {
+            "toImageButtonOptions": {"format": "png", "scale": 3}
+        }
     # Match the 3× plotly modebar PNG resolution for matplotlib outputs
     # (default dpi is 100). marimo scales the displayed image width
     # inversely so the figure looks the same on screen but the
@@ -202,13 +210,11 @@ def _(is_wasm):
 @app.cell(hide_code=True)
 def _(
     Path,
-    datetime,
     is_wasm,
     load_pr_interval_data,
     load_slimmed_data,
     mo,
     pl,
-    timezone,
 ):
     """Load parquet + join `core_user` so PRs carry `author_login`. In WASM the
     tables (incl. core_user) ship slimmed under public/ (see
@@ -230,7 +236,12 @@ def _(
         pl.col("id").alias("author_id"),
         pl.col("github_login").alias("author_login"),
     )
-    asof = datetime.now(tz=timezone.utc)
+    # Snapshot time, not wall-clock now(): these notebooks read a frozen data
+    # snapshot (especially the WASM export), so anchoring relative windows to a
+    # live clock drifts past the last observed event and empties every "last N
+    # days" window. `events.occurred_at` is the latest column surviving slimming
+    # and bounds the other timestamps. Per AGENTS.md, anchor windows to max(date).
+    asof = events["occurred_at"].max()
     return asof, events, inline_comments, prs_raw, queue_windows, users
 
 

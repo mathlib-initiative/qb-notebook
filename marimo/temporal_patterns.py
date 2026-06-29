@@ -50,8 +50,20 @@ async def _(mo):
         # build). pyarrow is needed because marimo patches pl.read_parquet to
         # route through it in WASM (qb_notebook.wasm_io reads the slimmed
         # parquet).
+        # tzdata: Pyodide ships no system zoneinfo database, so materializing
+        # tz-aware datetimes (e.g. `.to_dicts()` on a UTC column) raises
+        # ZoneInfoNotFoundError until this is installed.
         _ = await _micropip.install(
-            ["polars", "pandas", "numpy", "pyarrow", "matplotlib", "scipy", "pyyaml"]
+            [
+                "polars",
+                "pandas",
+                "numpy",
+                "pyarrow",
+                "matplotlib",
+                "scipy",
+                "pyyaml",
+                "tzdata",
+            ]
         )
         _wheel = (
             mo.notebook_location() / "public" / "qb_notebook-0.1.0-py3-none-any.whl"
@@ -109,8 +121,6 @@ def _(is_wasm):
         if str(_repo_root) not in sys.path:
             sys.path.insert(0, str(_repo_root))
 
-    from datetime import datetime, timezone
-
     import matplotlib.pyplot as plt
     import numpy as np
     import polars as pl
@@ -136,7 +146,6 @@ def _(is_wasm):
         WEEKDAY_LABELS,
         actor_activity_window,
         attribute_label_events,
-        datetime,
         first_review_touch,
         hour_set_overlap,
         load_pr_interval_data,
@@ -145,7 +154,6 @@ def _(is_wasm):
         np,
         pl,
         plt,
-        timezone,
         weekday_hour_histogram,
         with_temporal_columns,
     )
@@ -154,13 +162,11 @@ def _(is_wasm):
 @app.cell
 def _(
     Path,
-    datetime,
     is_wasm,
     load_pr_interval_data,
     load_slimmed_data,
     mo,
     pl,
-    timezone,
 ):
     # core_user join so first_review_touch / activity-window analyses can
     # compare author identity vs event-actor identity. In WASM it ships as a
@@ -179,7 +185,12 @@ def _(
         pl.col("id").alias("author_id"),
         pl.col("github_login").alias("author_login"),
     )
-    asof = datetime.now(tz=timezone.utc)
+    # Snapshot time, not wall-clock now(): these notebooks read a frozen data
+    # snapshot (especially the WASM export), so anchoring relative windows to a
+    # live clock drifts past the last observed event and empties every "last N
+    # days" window. `events.occurred_at` is the latest column surviving slimming
+    # and bounds the other timestamps. Per AGENTS.md, anchor windows to max(date).
+    asof = events["occurred_at"].max()
     return asof, events, prs_raw, users
 
 

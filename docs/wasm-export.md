@@ -207,6 +207,25 @@ much as possible offline, then a human hard-reloads the served page:
 - **pyarrow is required.** marimo patches `pl.read_parquet` to route through
   pyarrow in WASM (`marimo/_runtime/_wasm/_polars.py`). It must be in the
   bootstrap install list even though polars can normally read parquet itself.
+- **tzdata is required.** Pyodide ships no system zoneinfo database, so any
+  materialization of a tz-aware datetime (e.g. `df.to_dicts()` / `.rows()` on
+  a UTC column) raises `ZoneInfoNotFoundError: No time zone found with key
+  UTC`. Since this repo's datetimes are uniformly UTC-aware, `tzdata` is in
+  every notebook's bootstrap install list. (No code import needed — `zoneinfo`
+  falls back to the installed `tzdata` package automatically.)
+- **plotly has no default renderer in WASM.** `pio.renderers.default` is `""`,
+  so `pio.renderers[pio.renderers.default]` raises `KeyError: ''`. Guard any
+  renderer-config tweak with `if pio.renderers.default:` (see
+  `anatomy_of_a_merge.py`) — marimo renders plotly figures itself, so the
+  config only matters for a local kernel anyway.
+- **Anchor `asof` to the data, not `datetime.now()`.** A WASM export is a
+  frozen snapshot: the data stops at build time but the browser's wall clock
+  keeps advancing. So any "last N days" window measured from `now()` empties
+  out once the export is older than N days — `area_health`'s 30d/60d coverage
+  pivot then dropped a bucket column and raised `StopIteration`. Every
+  notebook now sets `asof = events["occurred_at"].max()` (the latest column
+  surviving slimming, which bounds the other timestamps), matching the
+  `max(date) - N days` convention in `AGENTS.md`.
 - **Library version gaps → `apply_wasm_compat_shims()`.** Pyodide ships older
   libs than the repo pins. Known shim: matplotlib `boxplot(tick_labels=...)`
   → `labels=` on matplotlib < 3.9. **Expect more to surface** as other

@@ -50,8 +50,20 @@ async def _(mo):
         # build). pyarrow is needed because marimo patches pl.read_parquet to
         # route through it in WASM (qb_notebook.wasm_io reads the slimmed
         # parquet).
+        # tzdata: Pyodide ships no system zoneinfo database, so materializing
+        # tz-aware datetimes (e.g. `.to_dicts()` on a UTC column) raises
+        # ZoneInfoNotFoundError until this is installed.
         _ = await _micropip.install(
-            ["polars", "pandas", "numpy", "pyarrow", "matplotlib", "scipy", "pyyaml"]
+            [
+                "polars",
+                "pandas",
+                "numpy",
+                "pyarrow",
+                "matplotlib",
+                "scipy",
+                "pyyaml",
+                "tzdata",
+            ]
         )
         _wheel = (
             mo.notebook_location() / "public" / "qb_notebook-0.1.0-py3-none-any.whl"
@@ -92,8 +104,6 @@ def _(is_wasm):
         if str(_repo_root) not in sys.path:
             sys.path.insert(0, str(_repo_root))
 
-    from datetime import datetime, timezone
-
     import matplotlib.pyplot as plt
     import numpy as np
     import polars as pl
@@ -119,7 +129,6 @@ def _(is_wasm):
         DEFAULT_PR_TYPES,
         Path,
         bucket_labels,
-        datetime,
         inline_comment_stats,
         label_intervals,
         label_overlap_seconds,
@@ -132,20 +141,17 @@ def _(is_wasm):
         plt,
         pr_type,
         size_buckets,
-        timezone,
     )
 
 
 @app.cell
 def _(
     Path,
-    datetime,
     is_wasm,
     load_pr_interval_data,
     load_slimmed_data,
     mo,
     pl,
-    timezone,
 ):
     # core_user maps author_id -> github_login so Section 9 can exclude
     # self-comments when rolling up inline-review-comment volume. In WASM it
@@ -173,7 +179,12 @@ def _(
     # Optional: present only when the artifact carries inline review
     # comments (post-#164 ingest). Section 9 cells guard on this.
     inline_comments = data.get("inline_comments")
-    asof = datetime.now(tz=timezone.utc)
+    # Snapshot time, not wall-clock now(): these notebooks read a frozen data
+    # snapshot (especially the WASM export), so anchoring relative windows to a
+    # live clock drifts past the last observed event and empties every "last N
+    # days" window. `events.occurred_at` is the latest column surviving slimming
+    # and bounds the other timestamps. Per AGENTS.md, anchor windows to max(date).
+    asof = events["occurred_at"].max()
     # Threaded into every `label_intervals` call below. GitHub does not
     # auto-remove labels when a PR is closed (bors-merged or otherwise);
     # without this clamp, e.g. `maintainer-merge` reports ~2964 phantom

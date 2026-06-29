@@ -41,8 +41,20 @@ async def _(mo):
         # build). pyarrow is needed because marimo patches pl.read_parquet to
         # route through it in WASM (qb_notebook.wasm_io reads the slimmed
         # parquet).
+        # tzdata: Pyodide ships no system zoneinfo database, so materializing
+        # tz-aware datetimes (e.g. `.to_dicts()` on a UTC column) raises
+        # ZoneInfoNotFoundError until this is installed.
         _ = await _micropip.install(
-            ["polars", "pandas", "numpy", "pyarrow", "matplotlib", "scipy", "pyyaml"]
+            [
+                "polars",
+                "pandas",
+                "numpy",
+                "pyarrow",
+                "matplotlib",
+                "scipy",
+                "pyyaml",
+                "tzdata",
+            ]
         )
         _wheel = (
             mo.notebook_location() / "public" / "qb_notebook-0.1.0-py3-none-any.whl"
@@ -181,13 +193,11 @@ def _(is_wasm):
 @app.cell
 def _(
     Path,
-    datetime,
     is_wasm,
     load_pr_interval_data,
     load_slimmed_data,
     mo,
     pl,
-    timezone,
 ):
     # core_user maps author_id -> github_login (author_login). In WASM it ships
     # as a slimmed table under public/ (see scripts/export_wasm_data.py);
@@ -206,7 +216,12 @@ def _(
         pl.col("id").alias("author_id"),
         pl.col("github_login").alias("author_login"),
     )
-    asof = datetime.now(tz=timezone.utc)
+    # Snapshot time, not wall-clock now(): these notebooks read a frozen data
+    # snapshot (especially the WASM export), so anchoring relative windows to a
+    # live clock drifts past the last observed event and empties every "last N
+    # days" window. `events.occurred_at` is the latest column surviving slimming
+    # and bounds the other timestamps. Per AGENTS.md, anchor windows to max(date).
+    asof = events["occurred_at"].max()
     return asof, events, prs_raw, queue_windows, users
 
 
