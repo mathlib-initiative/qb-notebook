@@ -458,7 +458,6 @@ def _(
     if len(_selected_types) < len(available_pr_types):
         prs_cohort = prs_cohort.filter(pl.col("pr_type").is_in(_selected_types))
 
-    cohort_label = cohort.value
     return (prs_cohort,)
 
 
