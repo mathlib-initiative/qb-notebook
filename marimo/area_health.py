@@ -578,7 +578,12 @@ def _(
     return
 
 
-@app.cell
+# Section 4 is disabled to avoid surfacing individual reviewer / maintainer
+# logins (the reviewer × area heatmap lists them on its y-axis). The compute
+# cell below is kept enabled because §5 (declining coverage) reuses
+# `reviewer_area` / `cutoff_30` / `cutoff_60`. Re-enable the section by
+# dropping `disabled=True` from these four cells.
+@app.cell(disabled=True)
 def _(mo):
     mo.md("""
     ## 4. Active reviewer coverage by area
@@ -631,14 +636,14 @@ def _(
     return active_30d, cutoff_30, cutoff_60, reviewer_area
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(active_30d, mo):
     mo.md("### Active reviewers per area (last 30 days)")
     active_30d
     return
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(np, pl, plt, reviewer_area, teams):
     """Top-15 areas × top-20 reviewers (count of attributed `maintainer-merge`
     triggers all-time). PRs with no `t-*` label at trigger time are excluded
@@ -701,7 +706,7 @@ def _(np, pl, plt, reviewer_area, teams):
     return
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(mo, pl, reviewer_area, teams):
     """Per-area team-coverage breakdown: distinct attributed
     `maintainer-merge` trigger actors per area, split into
@@ -843,14 +848,6 @@ def _(mo):
     - ~17 % of recent merged PRs carry **no** `t-*` label at merge
       time — they're invisible to per-area throughput. The plot above
       is therefore a lower bound on total area work.
-    - The bipartite matrix uses *attributed* trigger counts, not raw
-      `LABELED` actor — the bots are excluded by construction. Y-tick
-      labels are colored by team membership when the sibling
-      `leanprover-community.github.io` checkout is present
-      (maintainer = green, reviewer = blue, other = grey); the
-      per-area team-coverage table below the matrix breaks out how
-      many distinct reviewers from each tier have triggered a sign-off
-      in that area all-time.
     - "Reviewer-court latency by area" filters to area applications
       whose interval overlaps the last 2 years to keep numbers
       representative of the current process.

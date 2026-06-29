@@ -419,7 +419,12 @@ def _(mo, plt, rolling_by_team, rolling_days):
     return
 
 
-@app.cell
+# Sections 2 & 4 are disabled to avoid surfacing individual reviewer /
+# maintainer logins (the per-reviewer bar charts + table, and the bors
+# "maintainers with no observed trigger" name list). The aggregate
+# sections (1, 3, 5, 6) and team-overlay counts stay. Re-enable a cell by
+# dropping `disabled=True`.
+@app.cell(disabled=True)
 def _(mo):
     mo.md("""
     ## 2. Per-reviewer counts
@@ -431,7 +436,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(pl, signoff_attr):
     per_reviewer = (
         signoff_attr.filter(pl.col("attributed"))
@@ -451,7 +456,7 @@ def _(pl, signoff_attr):
     return (per_reviewer,)
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(per_reviewer, plt, top_n):
     _top = per_reviewer.head(int(top_n.value)).reverse()
     _fig, (_ax1, _ax2) = plt.subplots(
@@ -475,7 +480,7 @@ def _(per_reviewer, plt, top_n):
     return
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(per_reviewer, teams):
     """Per-reviewer table annotated with team membership."""
     if teams is None:
@@ -623,7 +628,8 @@ def _(np, plt, yearly):
     return
 
 
-@app.cell
+# Disabled — see the §2 note above (avoids surfacing individual logins).
+@app.cell(disabled=True)
 def _(mo):
     mo.md("""
     ## 4. Bors-trigger attribution
@@ -635,7 +641,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(bors_attr, pl, teams, top_n):
     per_bors = (
         bors_attr.filter(pl.col("attributed"))
@@ -666,7 +672,7 @@ def _(bors_attr, pl, teams, top_n):
     return per_bors, per_bors_top
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(per_bors_top, plt):
     _top = per_bors_top.reverse()
     _fig, _ax = plt.subplots(figsize=(8, max(4, 0.25 * _top.height)))
@@ -687,7 +693,7 @@ def _(per_bors_top, plt):
     return
 
 
-@app.cell
+@app.cell(disabled=True)
 def _(mo, per_bors, pl, teams):
     if teams is None or per_bors.height == 0:
         coverage_table = mo.md(
