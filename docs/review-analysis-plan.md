@@ -199,8 +199,11 @@ code.
 ## Status
 
 The nine notebooks in the [notebook guide](review-analysis/notebooks.md)
-are shipped, along with the helper inventory above and one plot-site-polish
-item still planned. Remaining gaps and synthesis stories are tracked in
+are shipped, along with the helper inventory above. One plot-site-polish
+item — cross-linking the plot site and the `/notebooks/` landing page for
+discoverability — is still planned (tracked under
+[`wasm-export.md`](wasm-export.md#remaining-work)). Remaining gaps and
+synthesis stories are tracked in
 [`backlog.md`](review-analysis/backlog.md): gaps ship autonomously, and
 synthesis stories pause for review on completion. Per-session provenance
 lives in git history.

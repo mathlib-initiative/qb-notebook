@@ -11,8 +11,10 @@ every one). The pattern was first proven on `marimo/queue_window_state.py` —
 it boots, installs packages, fetches the slimmed data, and renders with
 live-recomputing UI controls in a real browser. Each conversion is verified
 offline by reproducing the notebook's compute on full vs. slimmed data (see
-[Verifying](#verifying-without-a-browser)). The remaining work is adding a
-GitHub Pages deploy workflow (see [Remaining work](#remaining-work)).
+[Verifying](#verifying-without-a-browser)). The GitHub Pages deploy workflow
+is now wired up too (`.github/workflows/publish-plots-pages.yml`); the only
+remaining gate is a human in-browser smoke test of the deployed site (see
+[Deployment](#deployment-github-pages)).
 
 ## Why this is non-trivial
 

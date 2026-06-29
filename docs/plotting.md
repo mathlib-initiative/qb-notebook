@@ -69,12 +69,15 @@ adopted across the marimo notebooks is:
   centers are `sqrt(edges[:-1] * edges[1:])`.
 - Overlay a lognormal fit via `scipy.stats.lognorm.fit(x, floc=0)`
   and plot `n * diff(lognorm.cdf(edges, ...))` as the expected counts.
-- Annotate the panel with `μ`, `σ`, median, and p90.
+- Annotate the fit with `μ` and `σ` (and sample size `n`).
 
-The same recipe lives inside `plot_hist_and_lognormal_fit_overlays` and
+The same recipe lives inside `plot_hist_and_lognormal_fit_overlays`
+(pass `show_params_in_legend=True` for the `μ`/`σ`/`n` label) and
 `plot_lognormal_fit_counts_logbins`; new notebooks that need per-cell
 control over layout can copy the recipe inline (see
-`marimo/anatomy_of_a_merge.py` §2 for the 4-panel grid pattern).
+`marimo/anatomy_of_a_merge.py` §2 for the 4-panel grid pattern). For
+percentile markers like the median or p90, `plot_duration_hists` takes a
+`percentiles=` list and draws them as vlines or a rug.
 
 ## Notes for tests/CI
 
