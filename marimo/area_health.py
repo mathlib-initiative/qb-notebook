@@ -167,40 +167,23 @@ def _(
 
 @app.cell
 def _(Path, is_wasm, load_teams, load_teams_snapshot, mo):
-    """Team-membership overlay used by the reviewer × area matrix below.
-    In WASM it loads the `teams.json` snapshot shipped under public/ (see
-    scripts/build_wasm_site.write_teams_snapshot); locally it reads the
-    sibling `leanprover-community.github.io` checkout, falling through
-    gracefully if that checkout is missing."""
+    """Team-membership overlay for the (disabled) §4 reviewer × area views.
+    Kept enabled but silent so §4 re-enables cleanly — the status callout that
+    named team sizes is intentionally not rendered. In WASM it loads the
+    `teams.json` snapshot shipped under public/ (see
+    scripts/build_wasm_site.write_teams_snapshot); locally it reads the sibling
+    `leanprover-community.github.io` checkout, or None if that checkout is
+    missing."""
     if is_wasm:
         teams = load_teams_snapshot(str(mo.notebook_location() / "public"))
-        teams_status = mo.md(
-            f"Loaded team snapshot — "
-            f"{len(teams.reviewers)} reviewers, "
-            f"{len(teams.maintainers)} maintainers."
-        )
     else:
         _candidate = (
             Path(__file__).resolve().parents[2] / "leanprover-community.github.io"
         )
         if _candidate.exists():
             teams = load_teams(_candidate, warn_on_unmatched=False)
-            teams_status = mo.md(
-                f"Loaded teams from `{_candidate}` — "
-                f"{len(teams.reviewers)} reviewers, "
-                f"{len(teams.maintainers)} maintainers, "
-                f"{len(teams.unmatched)} unmatched."
-            )
         else:
             teams = None
-            teams_status = mo.callout(
-                mo.md(
-                    f"Sibling checkout `{_candidate}` not found — "
-                    "team-membership overlays disabled."
-                ),
-                kind="warn",
-            )
-    teams_status
     return (teams,)
 
 

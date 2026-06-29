@@ -215,8 +215,10 @@ def _(mo):
     rolling_days = mo.ui.slider(
         start=7, stop=180, step=7, value=28, label="Rolling-window size (days)"
     )
+    # `top_n` drives the disabled §2/§4 per-reviewer charts; kept defined (so
+    # those sections re-enable cleanly) but left out of the visible controls.
     top_n = mo.ui.slider(start=5, stop=50, step=1, value=20, label="Top-N reviewers")
-    mo.hstack([window_minutes, rolling_days, top_n])
+    mo.hstack([window_minutes, rolling_days])
     return rolling_days, top_n, window_minutes
 
 
