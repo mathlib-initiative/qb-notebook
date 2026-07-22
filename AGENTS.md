@@ -168,6 +168,30 @@ Conventions:
   2. adding `render_*` functions returning `matplotlib.figure.Figure`
   3. adding a `PlotDefinition` to `PLOTS` in desired display order
 
+## Weekly Meeting Stats
+
+`scripts/weekly_report.py` (logic in `qb_notebook/weekly_report.py`) assembles the
+weekly Mathlib Initiative meeting numbers and prints a paste-ready
+Today / Last / Avg8w / Diff table. It replaces the old manual flow
+(`scripts/pr_table.sh`, `scripts/decl-log.sh`, and the queueboard JSON + `jq`
+step).
+
+- Run from the repo root:
+  - `uv run python -m scripts.weekly_report` (this week; `--dry-run` to preview)
+  - `uv run python -m scripts.weekly_report --anchor 2026-07-20 --tactic-docs 125`
+- Data sources: queueboard counts + top-10 review times scrape the **public**
+  dashboard (`leanprover-community.github.io/queueboard`) by default, with the
+  open-PR total via `gh` search `total_count`; set `QUEUEBOARD_API_BASE_URL` (or
+  `--queueboard-api-base`) to use the JSON snapshot API instead. Commit counts
+  come from `git log upstream/master` over the reported week (needs a `../mathlib4`
+  checkout with an `upstream` remote). Definitions/theorems scrape
+  `mathlib_stats.html`.
+- The one non-automatable metric, "#rewritten tactic docs", is carried forward and
+  flagged; pass `--tactic-docs N` to set it.
+- The time series lives in a **gitignored** CSV (`weekly_stats.csv`, path via
+  `--store`), not committed. It stores cumulative def/theorem totals so weekly
+  deltas self-heal after the first run.
+
 ## Coding Conventions for This Repo
 
 - Prefer Polars expressions and dataframe operations over pandas unless
