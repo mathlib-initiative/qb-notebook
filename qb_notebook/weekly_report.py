@@ -21,12 +21,19 @@ import re
 import subprocess
 import time
 import urllib.request
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from statistics import mean
 
 DEFAULT_QUEUEBOARD_SITE = "https://leanprover-community.github.io/queueboard"
 DEFAULT_MATHLIB_STATS_URL = "https://leanprover-community.github.io/mathlib_stats.html"
+# The deployed (rendered) leanprover-community.github.io site lives on its
+# ``master`` branch: the deploy bot commits the built ``mathlib_stats.html``
+# there roughly daily, so its git history is a dated series of declaration
+# counts (see ``decl_counts_from_git``). ``origin/master`` rather than a bare
+# ``master`` because local ``master`` refs tend to be stale.
+DEFAULT_STATS_GIT_REF = "origin/master"
+DEFAULT_STATS_GIT_PATH = "mathlib_stats.html"
 DEFAULT_REPO = "leanprover-community/mathlib4"
 DEFAULT_RULE_SET_ID = 3
 _USER_AGENT = "qb-notebook-weekly-report"
@@ -227,6 +234,94 @@ def _parse_decl_counts(html: str, *, source: str = "stats page") -> tuple[int, i
 
 
 # --------------------------------------------------------------------------- #
+# declaration counts from git history (reconstructing past weeks)
+# --------------------------------------------------------------------------- #
+def fetch_stats_ref(repo_dir: str | Path, ref: str = DEFAULT_STATS_GIT_REF) -> None:
+    """``git fetch`` the ``remote/branch`` named by ``ref`` (e.g. ``origin/master``)."""
+    remote, _, branch = ref.partition("/")
+    if not branch:
+        raise WeeklyReportError(f"Expected a 'remote/branch' ref, got {ref!r}")
+    _run(["git", "fetch", remote, branch], cwd=Path(repo_dir).expanduser())
+
+
+def resolve_stats_commit(
+    repo_dir: str | Path,
+    on_or_before: date,
+    *,
+    ref: str = DEFAULT_STATS_GIT_REF,
+    path: str = DEFAULT_STATS_GIT_PATH,
+) -> tuple[str, date]:
+    """Newest deploy of ``path`` on ``ref`` committed on/before ``on_or_before``.
+
+    The deployed site regenerates ``mathlib_stats.html`` from live counts and is
+    committed roughly daily, so the most recent commit touching ``path`` at or
+    before a date is that date's snapshot. Returns ``(commit_sha, commit_date)``.
+
+    Comparison is by committer date in UTC, with ``on_or_before`` treated
+    inclusively (any commit up to the end of that day, UTC, is eligible).
+    """
+    repo_dir = Path(repo_dir).expanduser()
+    if not (repo_dir / ".git").exists():
+        raise WeeklyReportError(f"Not a git repo: {repo_dir}")
+    # `git log --before` filters on committer date; make the whole of
+    # `on_or_before` (UTC) eligible by cutting off at the following midnight.
+    cutoff = f"{(on_or_before + timedelta(days=1)).isoformat()}T00:00:00+00:00"
+    out = _run(
+        [
+            "git",
+            "log",
+            ref,
+            "-1",
+            "--format=%H%x09%cI",
+            f"--before={cutoff}",
+            "--",
+            path,
+        ],
+        cwd=repo_dir,
+    ).strip()
+    if not out:
+        raise WeeklyReportError(
+            f"No commit of {path} on {ref} at or before {on_or_before} in {repo_dir}"
+        )
+    sha, iso = out.split("\t", 1)
+    commit_date = datetime.fromisoformat(iso).astimezone(timezone.utc).date()
+    return sha, commit_date
+
+
+def decl_counts_at_commit(
+    repo_dir: str | Path,
+    commit: str,
+    *,
+    path: str = DEFAULT_STATS_GIT_PATH,
+) -> tuple[int, int]:
+    """Parse ``(definitions, theorems)`` from ``path`` at a specific ``commit``."""
+    html = _run(["git", "show", f"{commit}:{path}"], cwd=Path(repo_dir).expanduser())
+    return _parse_decl_counts(html, source=f"{commit[:9]}:{path}")
+
+
+def decl_counts_from_git(
+    repo_dir: str | Path,
+    on_or_before: date,
+    *,
+    ref: str = DEFAULT_STATS_GIT_REF,
+    path: str = DEFAULT_STATS_GIT_PATH,
+    fetch: bool = False,
+) -> tuple[int, int]:
+    """Reconstruct the ``(definitions, theorems)`` totals as of ``on_or_before``.
+
+    Git-history analogue of :func:`decl_counts`, which can only see *today*: reads
+    the rendered ``mathlib_stats.html`` from the newest ``ref`` deploy on/before
+    ``on_or_before`` (see :func:`resolve_stats_commit`). Set ``fetch=True`` to
+    ``git fetch`` the ref first (only needed if the local clone is stale).
+    """
+    repo_dir = Path(repo_dir).expanduser()
+    if fetch:
+        fetch_stats_ref(repo_dir, ref)
+    commit, _ = resolve_stats_commit(repo_dir, on_or_before, ref=ref, path=path)
+    return decl_counts_at_commit(repo_dir, commit, path=path)
+
+
+# --------------------------------------------------------------------------- #
 # queueboard (metrics 1, 2, 6, 7)
 # --------------------------------------------------------------------------- #
 def open_pr_count(repo: str = DEFAULT_REPO) -> int:
@@ -399,6 +494,24 @@ def append_week(path: str | Path, row: dict) -> None:
         )
 
 
+def write_store(path: str | Path, rows: list[dict]) -> None:
+    """Overwrite the CSV store with ``rows`` (header + :data:`STORE_FIELDS` order).
+
+    Companion to :func:`read_store`, for rewriting existing rows in place (e.g. a
+    backfill); ``None`` values become empty cells. Use :func:`append_week` to add
+    a single row without rewriting the file.
+    """
+    import csv
+
+    with Path(path).open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=STORE_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(
+                {k: ("" if row.get(k) is None else row[k]) for k in STORE_FIELDS}
+            )
+
+
 def decl_deltas(
     history: list[dict], defs_total: int, thms_total: int
 ) -> tuple[int | None, int | None]:
@@ -414,6 +527,38 @@ def decl_deltas(
     if prev is None:
         return None, None
     return defs_total - int(prev["defs_total"]), thms_total - int(prev["thms_total"])
+
+
+def backfill_decl_columns(rows, counts_at, *, week: int = 7):
+    """Fill ``defs_total``/``thms_total`` and recompute the declaration deltas.
+
+    ``rows`` are store rows (as from :func:`read_store`); returns *new* row dicts
+    (the inputs are left untouched) with the four declaration columns set from
+    ``counts_at(d) -> (defs, thms) | None`` — a lookup that resolves the
+    cumulative totals as of date ``d`` (e.g. :func:`decl_counts_from_git`), or
+    ``None`` when that week cannot be resolved.
+
+    Unlike the live :func:`decl_deltas` (which diffs against the previous *stored*
+    row), each weekly delta here is a true ``week``-day window,
+    ``total(d) - total(d - week days)``. Because git history is dense (a deploy
+    per day), that stays correct even when the store skipped a week — the two
+    rules coincide whenever consecutive rows are exactly ``week`` days apart.
+    """
+    out = []
+    for row in rows:
+        d = date.fromisoformat(row["date"])
+        now = counts_at(d)
+        prev = counts_at(d - timedelta(days=week))
+        new = dict(row)
+        new["defs_total"] = None if now is None else now[0]
+        new["thms_total"] = None if now is None else now[1]
+        if now is None or prev is None:
+            new["defs_delta"] = new["thms_delta"] = None
+        else:
+            new["defs_delta"] = now[0] - prev[0]
+            new["thms_delta"] = now[1] - prev[1]
+        out.append(new)
+    return out
 
 
 # --------------------------------------------------------------------------- #

@@ -194,11 +194,18 @@ step).
 - Each (non-dry) run also writes the slide table to a gitignored
   `weekly_report.csv` (path via `--report-csv`): import into Google Sheets,
   then copy-paste the range into Slides (Slides won't take raw CSV text).
-- Missed weeks can't be reconstructed automatically (the queueboard/declaration
-  sources are live scrapes; only commit counts are historical) — refill by
-  hand-adding a row to `weekly_stats.csv` from that week's slides. Rows are
-  sorted on read, so append order doesn't matter. The script warns when the
-  "Last" baseline is more than one week old.
+- Missed weeks are only partly reconstructable. The queueboard/open-PR numbers
+  are live scrapes (today only); refill those by hand-adding a row to
+  `weekly_stats.csv` from that week's slides. Commit counts are historical via
+  `git log`, and the def/theorem counts *can* be reconstructed after the fact:
+  `scripts/backfill_decls.py` reads each dated snapshot of `mathlib_stats.html`
+  from the git history of a `../leanprover-community.github.io` checkout (its
+  `master` branch is the rendered, daily-committed site) and fills the
+  `defs_total`/`thms_total` columns, recomputing the weekly deltas as true
+  7-day windows (`total(D) - total(D-7)`, robust to skipped weeks). It is
+  dry-run by default; pass `--write` to apply. Rows are sorted on read, so
+  append order doesn't matter. The report script warns when the "Last" baseline
+  is more than one week old.
 
 ## Coding Conventions for This Repo
 

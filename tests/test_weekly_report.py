@@ -86,6 +86,146 @@ def test_parse_decl_counts_missing_header_raises():
 
 
 # --------------------------------------------------------------------------- #
+# declaration counts from git history
+# --------------------------------------------------------------------------- #
+_COUNTS_HTML = (
+    "<h2>Counts</h2><table><tr>"
+    "<th>Definitions</th><th>Theorems</th><th>Contributors</th></tr>"
+    "<tr><td>130,157</td><td>272490</td><td>556</td></tr></table>"
+)
+
+
+def test_fetch_stats_ref_builds_fetch_command(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(wr, "_run", lambda cmd, **k: calls.append(cmd) or "")
+    wr.fetch_stats_ref(tmp_path, "origin/master")
+    assert calls == [["git", "fetch", "origin", "master"]]
+
+
+def test_fetch_stats_ref_rejects_bare_ref(tmp_path):
+    with pytest.raises(wr.WeeklyReportError):
+        wr.fetch_stats_ref(tmp_path, "master")
+
+
+def test_resolve_stats_commit_selects_and_parses_date(monkeypatch, tmp_path):
+    (tmp_path / ".git").mkdir()
+    seen = {}
+
+    def fake_run(cmd, **k):
+        seen["cmd"] = cmd
+        return "abc123\t2026-06-15T05:22:10+00:00\n"
+
+    monkeypatch.setattr(wr, "_run", fake_run)
+    sha, day = wr.resolve_stats_commit(tmp_path, date(2026, 6, 15))
+    assert sha == "abc123"
+    assert day == date(2026, 6, 15)
+    # `on_or_before` is inclusive: the cutoff is the *following* midnight, UTC.
+    assert "--before=2026-06-16T00:00:00+00:00" in seen["cmd"]
+
+
+def test_resolve_stats_commit_no_match_raises(monkeypatch, tmp_path):
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(wr, "_run", lambda *a, **k: "\n")
+    with pytest.raises(wr.WeeklyReportError):
+        wr.resolve_stats_commit(tmp_path, date(2019, 1, 1))
+
+
+def test_resolve_stats_commit_requires_git_repo(tmp_path):
+    with pytest.raises(wr.WeeklyReportError):
+        wr.resolve_stats_commit(tmp_path, date(2026, 6, 15))
+
+
+def test_decl_counts_from_git_end_to_end(monkeypatch, tmp_path):
+    (tmp_path / ".git").mkdir()
+
+    def fake_run(cmd, **k):
+        if "log" in cmd:
+            return "abc123\t2026-05-04T05:10:00+00:00\n"
+        if "show" in cmd:
+            return _COUNTS_HTML
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(wr, "_run", fake_run)
+    assert wr.decl_counts_from_git(tmp_path, date(2026, 5, 4)) == (130157, 272490)
+
+
+def test_decl_counts_from_git_fetches_when_requested(monkeypatch, tmp_path):
+    (tmp_path / ".git").mkdir()
+    fetched = []
+
+    def fake_run(cmd, **k):
+        if "fetch" in cmd:
+            fetched.append(cmd)
+            return ""
+        if "log" in cmd:
+            return "abc123\t2026-05-04T05:10:00+00:00\n"
+        return _COUNTS_HTML
+
+    monkeypatch.setattr(wr, "_run", fake_run)
+    wr.decl_counts_from_git(tmp_path, date(2026, 5, 4), fetch=True)
+    assert fetched == [["git", "fetch", "origin", "master"]]
+
+
+# --------------------------------------------------------------------------- #
+# backfilling the store's declaration columns
+# --------------------------------------------------------------------------- #
+def test_backfill_decl_columns_uses_seven_day_window():
+    # A dense daily history; the store skips a week between the 2nd and 3rd row.
+    totals = {
+        date(2026, 5, 4): (130157, 272490),
+        date(2026, 4, 27): (129763, 271289),  # 7 days before the first row
+        date(2026, 5, 26): (131160, 274770),
+        date(2026, 5, 19): (130804, 273839),  # 7 days before the gap row
+    }
+    rows = [
+        {
+            "date": "2026-05-04",
+            "open_prs": 2451,
+            "defs_total": None,
+            "thms_total": None,
+        },
+        {
+            "date": "2026-05-26",
+            "open_prs": 2624,
+            "defs_total": None,
+            "thms_total": None,
+        },
+    ]
+    out = wr.backfill_decl_columns(rows, lambda d: totals.get(d))
+
+    assert out[0]["defs_total"] == 130157 and out[0]["thms_total"] == 272490
+    # Delta is total(D) - total(D-7), not a diff against the previous stored row.
+    assert out[0]["defs_delta"] == 130157 - 129763
+    assert out[0]["thms_delta"] == 272490 - 271289
+    assert out[1]["defs_delta"] == 131160 - 130804
+    assert out[1]["thms_delta"] == 274770 - 273839
+    # Non-declaration columns are preserved; inputs are not mutated.
+    assert out[0]["open_prs"] == 2451
+    assert rows[0]["defs_total"] is None
+
+
+def test_backfill_decl_columns_missing_week_leaves_none():
+    rows = [{"date": "2026-05-04", "defs_total": None, "thms_total": None}]
+    out = wr.backfill_decl_columns(rows, lambda d: None)
+    assert out[0]["defs_total"] is None
+    assert out[0]["defs_delta"] is None and out[0]["thms_delta"] is None
+
+
+def test_write_store_round_trip(tmp_path):
+    path = tmp_path / "weekly_stats.csv"
+    rows = [
+        {k: None for k in [*wr.METRIC_KEYS, *wr.EXTRA_KEYS]} | {"date": "2026-05-04"},
+        {k: None for k in [*wr.METRIC_KEYS, *wr.EXTRA_KEYS]}
+        | {"date": "2026-05-11", "defs_total": 130533, "defs_delta": 376},
+    ]
+    wr.write_store(path, rows)
+    back = wr.read_store(path)
+    assert [r["date"] for r in back] == ["2026-05-04", "2026-05-11"]
+    assert back[0]["defs_total"] is None
+    assert back[1]["defs_total"] == 130533 and back[1]["defs_delta"] == 376
+
+
+# --------------------------------------------------------------------------- #
 # commit classification (git output monkeypatched)
 # --------------------------------------------------------------------------- #
 def test_commit_counts_classifies_feat(monkeypatch, tmp_path):
