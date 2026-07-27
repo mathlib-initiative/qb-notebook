@@ -12,4 +12,5 @@ _site_wasm/
 
 # Weekly MI-meeting stats store + its retired spreadsheet source (data, not code).
 weekly_stats.csv
+weekly_report.csv
 running stats.xlsx

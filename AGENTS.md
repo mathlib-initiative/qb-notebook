@@ -191,6 +191,14 @@ step).
 - The time series lives in a **gitignored** CSV (`weekly_stats.csv`, path via
   `--store`), not committed. It stores cumulative def/theorem totals so weekly
   deltas self-heal after the first run.
+- Each (non-dry) run also writes the slide table to a gitignored
+  `weekly_report.csv` (path via `--report-csv`): import into Google Sheets,
+  then copy-paste the range into Slides (Slides won't take raw CSV text).
+- Missed weeks can't be reconstructed automatically (the queueboard/declaration
+  sources are live scrapes; only commit counts are historical) — refill by
+  hand-adding a row to `weekly_stats.csv` from that week's slides. Rows are
+  sorted on read, so append order doesn't matter. The script warns when the
+  "Last" baseline is more than one week old.
 
 ## Coding Conventions for This Repo
 

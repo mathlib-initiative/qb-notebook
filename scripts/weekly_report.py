@@ -8,8 +8,13 @@ Run from the repo root::
     uv run python -m scripts.weekly_report --anchor 2026-07-20 --tactic-docs 125
 
 Gathers the eight automatable metrics, carries the one manual metric
-(rewritten tactic docs) forward, appends a row to the CSV store, and prints a
-paste-ready Today / Last / Avg8w / Diff table for the slide.
+(rewritten tactic docs) forward, appends a row to the CSV store, prints a
+Today / Last / Avg8w / Diff table, and writes the same table to a small CSV
+(``weekly_report.csv``) — import that into Google Sheets and copy-paste the
+range into the slide.
+
+Missed a week? Add the row to ``weekly_stats.csv`` by hand (from that week's
+slides); the store is sorted on read, so append order doesn't matter.
 
 The queueboard backend defaults to scraping the public dashboard; set
 ``--queueboard-api-base`` or ``$QUEUEBOARD_API_BASE_URL`` to use the JSON API.
@@ -19,7 +24,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from qb_notebook.weekly_report import (
@@ -34,10 +39,12 @@ from qb_notebook.weekly_report import (
     decl_counts,
     decl_deltas,
     fetch_queueboard_metrics,
+    format_value,
     open_pr_count,
     read_store,
     report_date,
     week_window,
+    write_report_csv,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -70,6 +77,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=Path,
         default=REPO_ROOT / "weekly_stats.csv",
         help="CSV store path (default: ./weekly_stats.csv).",
+    )
+    p.add_argument(
+        "--report-csv",
+        type=Path,
+        default=REPO_ROOT / "weekly_report.csv",
+        help="Where to write the slide-ready report table "
+        "(default: ./weekly_report.csv; import into Google Sheets, then "
+        "copy-paste the range into Slides).",
     )
     p.add_argument("--repo", default=DEFAULT_REPO)
     p.add_argument("--rule-set-id", type=int, default=DEFAULT_RULE_SET_ID)
@@ -158,14 +173,6 @@ def _gather(args: argparse.Namespace, history: list[dict]) -> dict:
     return row
 
 
-def _fmt(value, *, is_float: bool, signed: bool = False, avg: bool = False) -> str:
-    if value is None:
-        return "—"
-    if is_float or avg:
-        return f"{value:+.1f}" if signed else f"{value:.1f}"
-    return f"{int(round(value)):+d}" if signed else f"{int(round(value))}"
-
-
 def _print_report(args: argparse.Namespace, report: list[dict]) -> None:
     week_start, week_end = week_window(args.anchor)
     label = report_date(args.anchor).isoformat()
@@ -181,10 +188,10 @@ def _print_report(args: argparse.Namespace, report: list[dict]) -> None:
         flt = r["is_float"]
         line = (
             f"{r['label']:<{label_w}}  "
-            f"{_fmt(r['today'], is_float=flt):>8}  "
-            f"{_fmt(r['last'], is_float=flt):>8}  "
-            f"{_fmt(r['avg8w'], is_float=flt, avg=True):>8}  "
-            f"{_fmt(r['diff'], is_float=flt, signed=True):>7}"
+            f"{format_value(r['today'], is_float=flt):>8}  "
+            f"{format_value(r['last'], is_float=flt):>8}  "
+            f"{format_value(r['avg8w'], is_float=flt, avg=True):>8}  "
+            f"{format_value(r['diff'], is_float=flt, signed=True):>7}"
         )
         note = ""
         if r["manual"]:
@@ -201,6 +208,21 @@ def main(argv: list[str] | None = None) -> int:
     existing = [r for r in store_rows if r["date"] == label]
     history = [r for r in store_rows if r["date"] < label]
 
+    if label < report_date(date.today()).isoformat():
+        _warn(
+            f"{label} is a past week: queueboard, open-PR and declaration "
+            "numbers are scraped live and reflect *today*, not that week; "
+            "only the commit counts are historical. Prefer refilling past "
+            f"weeks by adding a row to {args.store} by hand."
+        )
+    prev_label = (report_date(args.anchor) - timedelta(days=7)).isoformat()
+    if history and history[-1]["date"] != prev_label:
+        _warn(
+            f"no stored row for {prev_label}; 'Last'/'Diff' use "
+            f"{history[-1]['date']} instead. Add the missing week to "
+            f"{args.store} to fix the baseline."
+        )
+
     if existing and not (args.force or args.dry_run):
         _warn(
             f"a row for {label} already exists in {args.store}; "
@@ -212,14 +234,16 @@ def main(argv: list[str] | None = None) -> int:
     _print_report(args, report)
 
     if args.dry_run:
-        print("\n(dry run — store not modified)")
+        print("\n(dry run — store and report CSV not written)")
         return 0
+    write_report_csv(args.report_csv, report)
+    print(f"\n✓ wrote slide table to {args.report_csv}")
     if existing and not args.force:
         return 0
     if existing and args.force:
         _rewrite_without(args.store, label, store_rows)
     append_week(args.store, row)
-    print(f"\n✓ recorded {label} in {args.store}")
+    print(f"✓ recorded {label} in {args.store}")
     return 0
 
 

@@ -417,7 +417,7 @@ def decl_deltas(
 
 
 # --------------------------------------------------------------------------- #
-# report assembly
+# report assembly and output
 # --------------------------------------------------------------------------- #
 def assemble_report(
     history: list[dict], new_row: dict, *, window: int = 8
@@ -448,3 +448,44 @@ def assemble_report(
             }
         )
     return report
+
+
+def format_value(
+    value,
+    *,
+    is_float: bool,
+    signed: bool = False,
+    avg: bool = False,
+    none: str = "—",
+) -> str:
+    """Format one report cell: one decimal for float/avg cells, ints otherwise."""
+    if value is None:
+        return none
+    if is_float or avg:
+        return f"{value:+.1f}" if signed else f"{value:.1f}"
+    return f"{int(round(value)):+d}" if signed else f"{int(round(value))}"
+
+
+def write_report_csv(path: str | Path, report: list[dict]) -> None:
+    """Write the assembled report as a small CSV table (for Google Sheets/Slides).
+
+    Cells hold the same formatted strings as the printed table, except that
+    missing values become empty cells (Sheets-friendly). Paste path: import the
+    CSV into Google Sheets, copy the range, paste into Slides as a table.
+    """
+    import csv
+
+    with Path(path).open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Metric", "Today", "Last", "Avg8w", "Diff"])
+        for r in report:
+            flt = r["is_float"]
+            writer.writerow(
+                [
+                    r["label"],
+                    format_value(r["today"], is_float=flt, none=""),
+                    format_value(r["last"], is_float=flt, none=""),
+                    format_value(r["avg8w"], is_float=flt, avg=True, none=""),
+                    format_value(r["diff"], is_float=flt, signed=True, none=""),
+                ]
+            )

@@ -173,3 +173,28 @@ def test_assemble_report_handles_missing_values():
     assert m["today"] is None and m["last"] is None
     assert m["avg8w"] is None and m["diff"] is None
     assert report["tactic_docs"]["manual"] is True
+
+
+# --------------------------------------------------------------------------- #
+# slide-table CSV
+# --------------------------------------------------------------------------- #
+def test_write_report_csv(tmp_path):
+    import csv
+
+    history = [{"open_prs": 2855, "top10_queue": 142.0}]
+    new_row = {"open_prs": 2987, "top10_queue": 144.446}
+    report = wr.assemble_report(history, new_row)
+    path = tmp_path / "weekly_report.csv"
+    wr.write_report_csv(path, report)
+
+    with path.open(newline="", encoding="utf-8") as f:
+        rows = list(csv.reader(f))
+    assert rows[0] == ["Metric", "Today", "Last", "Avg8w", "Diff"]
+    assert len(rows) == 1 + len(wr.METRIC_KEYS)
+    by_label = {r[0]: r[1:] for r in rows[1:]}
+    # Integer metric: plain ints, one-decimal average, signed diff.
+    assert by_label["Open PRs"] == ["2987", "2855", "2921.0", "+132"]
+    # Float metric: one decimal everywhere, signed diff.
+    assert by_label["Top 10 avg time on queue"] == ["144.4", "142.0", "143.2", "+2.4"]
+    # Missing values become empty cells, not em-dashes.
+    assert by_label["#definitions in Mathlib this week"] == ["", "", "", ""]
