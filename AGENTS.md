@@ -167,6 +167,22 @@ Conventions:
   1. extending `_load_context(...)` only with data needed by renderers
   2. adding `render_*` functions returning `matplotlib.figure.Figure`
   3. adding a `PlotDefinition` to `PLOTS` in desired display order
+- For a **two-way split** of PRs (feat/non-feat, MI/non-MI, LLM/non-LLM),
+  don't write a new renderer: put the two complementary frames in
+  `_load_context`, describe them with a `SplitSpec`, and add
+  `_qw3_split_plot(spec, window)` (PRs on queue) or
+  `_merged_split_plot(spec, window)` (merges per day) to `PLOTS`. `window` is
+  a `PlotWindow` — `FULL_WINDOW` (since 2023-01-01), `LAST_YEAR_WINDOW`
+  (trailing 365 days), or `LLM_WINDOW` (since 2025-12-01, because the
+  `LLM-generated` label was only created 2026-03-16). `PlotDefinition.note`
+  renders a caveat line above the image.
+- The MI cohort comes from `contributors_MI.json` at the repo root
+  (`--contributors` to override); the LLM split comes from the
+  `LLM-generated` label via `pr_ids_with_any_labels`.
+- In `_build_merged_split_per_day`, the two sides are joined and zero-filled
+  *before* `rolling_mean`. Keep that order: rolling each side separately makes
+  a sparse series (e.g. LLM merges) average over a much longer calendar span
+  than 14 days.
 
 ## Weekly Meeting Stats
 
