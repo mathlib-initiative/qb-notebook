@@ -190,6 +190,22 @@ lists which it leans on.
   stripped, `feature`/`docs` aliased, non-canonical → `other`, no
   prefix → `unparsed`). `bucket_labels(breaks)` exposes size-axis
   ordering and `pr_type_order()` exposes type-axis ordering for plots.
+- **Cohort helpers in `qb_notebook/cohorts.py`** — `CohortSpec` is a
+  declarative "which PRs" description (inclusive day bounds + `t-*`
+  topics + PR types + size buckets + author cohort, empty meaning "no
+  filter on this dimension") and `filter_cohort(df, spec, *,
+  t_intervals=...)` applies one to a wide per-PR frame;
+  `cohort_frames(df, specs)` slices once per spec into a
+  `{name: frame}` mapping (names uniquified by `with_unique_names`).
+  The aggregates take that mapping and return one tidy row per cohort
+  (`milestone_summary` — milestone counts, shares, median/p90 TTM) or
+  per cohort × stage (`stage_quantiles`, with `stage_series` for the
+  raw day-valued durations behind it). `Stage` / `DEFAULT_STAGES` name
+  the `pipeline_stages` duration columns and carry the optional
+  `min_seconds` floor (`MAINTAINER_FIRST_SECONDS` = 60 s for the
+  stage-2 maintainer-first regime). Because `pipeline_stages` is a pure
+  per-PR transform, callers run it **once** over the whole corpus and
+  slice the result — not once per cohort.
 
 A nice-to-have upstream change: an explicit `queueboard-core`
 ruleset preserving the original `awaiting-review` semantics, so the
@@ -198,7 +214,7 @@ code.
 
 ## Status
 
-The nine notebooks in the [notebook guide](review-analysis/notebooks.md)
+The ten notebooks in the [notebook guide](review-analysis/notebooks.md)
 are shipped, along with the helper inventory above. One plot-site-polish
 item — cross-linking the plot site and the `/notebooks/` landing page for
 discoverability — is still planned (tracked under

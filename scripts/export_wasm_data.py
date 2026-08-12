@@ -437,6 +437,43 @@ SPECS: dict[str, dict[str, list[str]]] = {
             "gh_created_at",
         ],
     },
+    # Cohort comparison. The multi-cohort companion to anatomy_of_a_merge:
+    # same enrichment and same pipeline_stages reconstruction, but no Sankey
+    # and no queue windows (it never counts review cycles), and no inline
+    # comments. Every figure is matplotlib, so no plotly/kaleido concerns.
+    #   prs       -> human-PR-to-master filter + size_buckets/pr_type/
+    #                author_cohort (the per-cohort filter dimensions); joined
+    #                to core_user. Bors-aware merged_at_effective.
+    #   events    -> pipeline_stages + label_intervals (t-* topic filter)
+    #   core_user -> id -> github_login (author_login)
+    "cohort_comparison": {
+        "prs": [
+            "id",
+            "author_id",
+            "gh_created_at",
+            "merged_at",
+            "closed_at",
+            "base_ref_name",
+            "title",
+            "state",
+            "number",
+            "additions",
+            "deletions",
+            "changed_files_count",
+            "repository_id",
+        ],
+        "events": [
+            "pull_request_id",
+            "type",
+            "label_name",
+            "occurred_at",
+            "actor_login",
+        ],
+        "core_user": [
+            "id",
+            "github_login",
+        ],
+    },
 }
 
 # Tables some notebooks read directly (not produced by load_pr_interval_data).

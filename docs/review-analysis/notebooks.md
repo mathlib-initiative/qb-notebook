@@ -1,7 +1,7 @@
 # Review Analysis — Notebook Guide
 
 A reader's guide to the marimo notebooks that analyze mathlib4's review
-process. All nine are shipped; this file says what each one answers, its
+process. All ten are shipped; this file says what each one answers, its
 headline findings, and the helpers it's built on.
 
 - **Run a notebook**: `uv run marimo edit marimo/<name>.py` (or `run`
@@ -166,6 +166,33 @@ decomposition.
 Built on: `pipeline_stages` (wraps `first_review_touch` +
 `stage_timestamps`), `labels_active_at`, `pr_shape`. First plotly usage
 in the set (Sankey); log-binned histograms with lognormal-fit overlay.
+
+## `cohort_comparison.py` — the same lifecycle, N cohorts side by side
+
+The multi-cohort companion to `anatomy_of_a_merge.py`. Define up to six
+cohorts — each its own PR-open window (preset or free-form), `t-*`
+topics, PR types, size buckets, and author cohort — and compare them in
+one view. Cohorts may overlap, nest, or partition.
+
+- §1 **funnel**: share of each cohort reaching first review /
+  `maintainer-merge` / `ready-to-merge` / merged / closed / still open,
+  as a table plus grouped bars.
+- §2 **per-stage distributions**: every cohort overlaid on shared
+  log-spaced bins, switchable to ECDF, with the stage-2 maintainer-first
+  floor (< 60 s) as a toggle, and a median/p90 table underneath.
+- §3 **stage mix**: the four sequential stages stacked at their medians
+  — where a cohort's time goes, not just how much of it there is.
+
+The intended use is holding composition constant (same size bucket, same
+PR type) and varying only the window, so a shift reads as process change
+rather than mix change. Right-censoring, composition shifts, and regime
+changes (bors 2022-08, `maintainer-merge` 2024-02) are called out in the
+notebook where each one bites.
+
+Built on: `qb_notebook.cohorts` (`CohortSpec` / `filter_cohort` /
+`cohort_frames` / `milestone_summary` / `stage_quantiles`),
+`pipeline_stages` (run once corpus-wide, then sliced per cohort),
+`label_intervals`, `pr_shape`.
 
 ## `request_effectiveness.py` — review requests & assignment policy
 

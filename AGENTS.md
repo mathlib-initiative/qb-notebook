@@ -8,7 +8,7 @@ This file gives coding agents repo-specific guidance for `qb-notebook`.
 - Package layout: `qb_notebook/` — data/IO + plotting helpers (`artifacts`,
   `data_io`, `filters`, `intervals`, `plotting`, `generate_plot_site`,
   `wasm_io`) plus the review-analysis helpers (`review_states`, `pr_shape`,
-  `teams`, `temporal`, `assignments`)
+  `teams`, `temporal`, `assignments`, `cohorts`)
 - Main data shape: parquet files under `data/`, produced upstream by
   [`queueboard-core`](https://github.com/leanprover-community/queueboard-core)
   (see "Upstream data source" below).
@@ -16,7 +16,7 @@ This file gives coding agents repo-specific guidance for `qb-notebook`.
   - library-style helpers (`qb_notebook.data_io`, `qb_notebook.filters`,
     `qb_notebook.intervals`, `qb_notebook.plotting`, plus the
     review-analysis helpers `qb_notebook.review_states`, `pr_shape`,
-    `teams`, `temporal`, `assignments`)
+    `teams`, `temporal`, `assignments`, `cohorts`)
   - notebook exploration:
     - Jupyter (`.ipynb`): `pr_merge_throughput`, `pr_open_durations`,
       `queue_windows`
