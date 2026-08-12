@@ -150,6 +150,11 @@ Cross-cutting helpers already in place:
   decorators and per-actor activity windows.
 - `qb_notebook.assignments` — assignment / review-request event
   classification and policy-outcome helpers.
+- `qb_notebook.cohorts` — declarative `CohortSpec` filters plus the
+  cross-cohort aggregates (`milestone_summary`, `stage_quantiles`) that
+  `cohort_comparison.py` is built on. Note the ordering rule there:
+  `pipeline_stages` is cohort-invariant, so run it **once** over the
+  whole corpus and slice with `filter_cohort`.
 - `qb_notebook.teams` — YAML loader for reviewer / maintainer team
   membership (needs a sibling `leanprover-community.github.io`
   checkout).
