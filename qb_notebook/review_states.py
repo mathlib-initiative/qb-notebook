@@ -75,6 +75,16 @@ MATHLIB_LABEL_RETIRED_AT: Mapping[str, datetime] = {
 # before the corresponding label was applied — important for ``delegated``
 # attribution (where the bors reply normally lands seconds before the
 # label) and also responsible for ~1 % of ``ready-to-merge`` mis-attributions.
+# The mathlib bot accounts were **renamed on 2026-02-03** (the ``mathlib4-*``
+# logins stop dead on 2026-02-02 and the ``mathlib-*`` successors start the
+# next day). Both spellings are kept: the old ones still own all pre-rename
+# history. Nothing in the exported data marks an actor as a bot — GitHub's
+# ``actor.__typename`` is fetched upstream but not persisted (see
+# queueboard-core design doc 051) — so this list is the only bot signal we
+# have, and it goes stale silently. Adding a name here changes every
+# first-touch-derived metric, so prefer over- to under-inclusion, but never
+# add a human: ``bottine`` and ``guptbot`` are human contributors whose logins
+# merely look bot-like.
 DEFAULT_BOT_ACTORS: frozenset[str] = frozenset(
     {
         "github-actions",
@@ -87,6 +97,19 @@ DEFAULT_BOT_ACTORS: frozenset[str] = frozenset(
         "mathlib-bors",
         "bors",
         "leanprover-radar",
+        # Renamed 2026-02-03 from the ``mathlib4-*`` spellings above.
+        "mathlib-merge-conflicts",
+        "mathlib-dependent-issues",
+        # Post-rename additions and older accounts that were never listed.
+        "mathlib-auto-merge",
+        "mathlib-splicebot",
+        "leanprover-bot",
+        "mergify",
+        "downstream-reports-automation",
+        "botbaki-review",
+        # Automated reviewers: genuine review signal, but not human.
+        "copilot-pull-request-reviewer",
+        "copilot-swe-agent",
     }
 )
 
