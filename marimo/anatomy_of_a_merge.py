@@ -107,7 +107,9 @@ def _(mo):
     `pr_open_durations.ipynb`), so log binning + lognormal-fit
     overlays make the shape readable.
 
-    All cohort-dependent cells refire on the dropdown change.
+    The cohort is any date range of PR-open dates: pick one of the
+    preset windows to seed the range, then adjust either end freely.
+    All cohort-dependent cells refire on the change.
     """)
     return
 
@@ -126,7 +128,7 @@ def _(is_wasm):
 
     import json
     import re
-    from datetime import datetime, timezone
+    from datetime import date, datetime, timedelta, timezone
 
     import matplotlib.pyplot as plt
     import numpy as np
@@ -181,6 +183,7 @@ def _(is_wasm):
         Path,
         author_cohort,
         bucket_labels,
+        date,
         datetime,
         expr_merged_at_effective,
         expr_merged_to_master,
@@ -203,6 +206,7 @@ def _(is_wasm):
         queue_window_intervals,
         re,
         size_buckets,
+        timedelta,
         timezone,
     )
 
@@ -328,12 +332,35 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(mo):
-    """Cohort dropdown. Post-MM is the default since the `maintainer-merge`
-    label only exists from 2024-02-15, so the headline funnel is only
-    meaningful for PRs whose lifecycle could have included that stage.
-    All-time is included for the long-baseline comparison."""
-    cohort = mo.ui.dropdown(
+def _(asof, date, mo, timedelta):
+    """Cohort presets. The date range below is free-form; these are just
+    convenient seeds for it. Bounds are **inclusive dates**, and `None`
+    means "open" — resolved to the data's own first/last `gh_created_at`
+    day by the seeding cell below.
+
+    Post-MM is the default since the `maintainer-merge` label only exists
+    from 2024-02-15, so the headline funnel is only meaningful for PRs
+    whose lifecycle could have included that stage. All-time is kept for
+    the long-baseline comparison.
+
+    The relative windows are anchored to `asof` (the data snapshot), not
+    `date.today()` — this notebook is published as a frozen WASM export,
+    so a wall-clock anchor would drift past the last observed event and
+    empty the window. Same convention as the `asof` cell above."""
+    _snapshot_day = asof.date()
+    COHORT_PRESETS = {
+        "post_mm": (date(2024, 2, 15), None),
+        "pre_mm": (None, date(2024, 2, 14)),
+        "pre_bors": (None, date(2022, 7, 31)),
+        "bors_pre_mm": (date(2022, 8, 1), date(2024, 2, 14)),
+        "2024": (date(2024, 2, 15), date(2024, 12, 31)),
+        "2025": (date(2025, 1, 1), date(2025, 12, 31)),
+        "2026": (date(2026, 1, 1), None),
+        "last_90d": (_snapshot_day - timedelta(days=90), None),
+        "last_365d": (_snapshot_day - timedelta(days=365), None),
+        "all": (None, None),
+    }
+    cohort_preset = mo.ui.dropdown(
         options={
             "post-MM (2024-02-15+)": "post_mm",
             "pre-MM (pre-2024-02-15)": "pre_mm",
@@ -341,11 +368,19 @@ def _(mo):
             "bors → pre-MM (2022-08-01 to 2024-02-15)": "bors_pre_mm",
             "2024 (post-MM)": "2024",
             "2025": "2025",
+            "2026 (to snapshot)": "2026",
+            "last 90 days": "last_90d",
+            "last 365 days": "last_365d",
             "all-time": "all",
         },
         value="post-MM (2024-02-15+)",
-        label="Cohort",
+        label="Preset",
     )
+    # Re-seeds the date range from the preset currently in the dropdown.
+    # Needed because picking the *same* preset again is not a change
+    # event, so there'd otherwise be no way back after hand-editing the
+    # dates. Same click-counter pattern as the topic All/None buttons.
+    reseed_btn = mo.ui.button(label="↻ Apply preset", value=0, on_click=lambda v: v + 1)
 
     show_cycle_branches = mo.ui.checkbox(
         value=True,
@@ -362,8 +397,88 @@ def _(mo):
         label="Sankey height (px)",
         show_value=True,
     )
-    mo.hstack([cohort, show_cycle_branches, sankey_height])
-    return cohort, sankey_height, show_cycle_branches
+    return (
+        COHORT_PRESETS,
+        cohort_preset,
+        reseed_btn,
+        sankey_height,
+        show_cycle_branches,
+    )
+
+
+@app.cell(hide_code=True)
+def _(COHORT_PRESETS, cohort_preset, mo, pl, prs_enriched, reseed_btn):
+    """The actual cohort control: a free-form `gh_created_at` date range,
+    seeded from whichever preset is selected. Changing the preset (or
+    clicking *Apply preset*) re-runs this cell, which rebuilds the picker
+    and therefore resets it to the preset's bounds; hand-editing a date
+    doesn't re-run it, so a custom range survives until the next preset
+    action. Both ends are **inclusive**.
+
+    `start` / `stop` pin the picker to the data's own first/last PR-open
+    day, so no selection can land outside the snapshot. Preset bounds are
+    clamped into that same window — `mo.ui.date_range` raises on an
+    out-of-range `value`, and a preset like `2026` would otherwise sit
+    past the end of an older data export."""
+    _span = prs_enriched.select(
+        pl.col("gh_created_at").min().alias("lo"),
+        pl.col("gh_created_at").max().alias("hi"),
+    ).row(0)
+    data_lo_day, data_hi_day = _span[0].date(), _span[1].date()
+
+    def _clamp(day):
+        return min(max(day, data_lo_day), data_hi_day)
+
+    _preset_lo, _preset_hi = COHORT_PRESETS[cohort_preset.value]
+    _lo = data_lo_day if _preset_lo is None else _clamp(_preset_lo)
+    _hi = data_hi_day if _preset_hi is None else _clamp(_preset_hi)
+    _ = reseed_btn.value  # dependency only: clicking re-seeds from the preset
+
+    cohort_range = mo.ui.date_range(
+        start=data_lo_day,
+        stop=data_hi_day,
+        value=(_lo, _hi),
+        label="PRs opened between",
+    )
+    return cohort_range, data_hi_day, data_lo_day
+
+
+@app.cell(hide_code=True)
+def _(
+    cohort_preset,
+    cohort_range,
+    data_hi_day,
+    data_lo_day,
+    mo,
+    reseed_btn,
+    sankey_height,
+    show_cycle_branches,
+):
+    """Render the controls. Separate from the cells that create them
+    because marimo forbids reading a UIElement's `.value` in its own
+    cell — needed here for the resolved-range caption."""
+    _lo, _hi = cohort_range.value
+    _days = (_hi - _lo).days + 1
+    mo.vstack(
+        [
+            mo.hstack(
+                [cohort_preset, reseed_btn, cohort_range],
+                justify="start",
+                wrap=True,
+            ),
+            mo.md(
+                f"Cohort: PRs opened **{_lo.isoformat()} → {_hi.isoformat()}** "
+                f"({_days:,} days). Data covers {data_lo_day.isoformat()} → "
+                f"{data_hi_day.isoformat()}."
+            ),
+            mo.hstack(
+                [show_cycle_branches, sankey_height],
+                justify="start",
+                wrap=True,
+            ),
+        ]
+    )
+    return
 
 
 @app.cell(hide_code=True)
@@ -482,12 +597,13 @@ def _(
     TOPIC_NONE,
     available_pr_types,
     available_topics,
-    cohort,
+    cohort_range,
     datetime,
     pl,
     pr_type_checks,
     prs_enriched,
     t_intervals,
+    timedelta,
     timezone,
     topic_checks,
 ):
@@ -496,33 +612,21 @@ def _(
     appears in `t_intervals` under any selected t-* label, and unions
     in the unlabeled bucket when `TOPIC_NONE` is checked; PR-type
     filter is a column-level `is_in` on the parsed conventional prefix.
-    If a sub-filter has nothing selected, the cohort collapses to
-    empty — that matches the literal "no PRs match" reading."""
-    _COHORT_BOUNDS = {
-        "post_mm": (datetime(2024, 2, 15, tzinfo=timezone.utc), None),
-        "pre_mm": (None, datetime(2024, 2, 15, tzinfo=timezone.utc)),
-        "pre_bors": (None, datetime(2022, 8, 1, tzinfo=timezone.utc)),
-        "bors_pre_mm": (
-            datetime(2022, 8, 1, tzinfo=timezone.utc),
-            datetime(2024, 2, 15, tzinfo=timezone.utc),
-        ),
-        "2024": (
-            datetime(2024, 2, 15, tzinfo=timezone.utc),
-            datetime(2025, 1, 1, tzinfo=timezone.utc),
-        ),
-        "2025": (
-            datetime(2025, 1, 1, tzinfo=timezone.utc),
-            datetime(2026, 1, 1, tzinfo=timezone.utc),
-        ),
-        "all": (None, None),
-    }
-    _lo, _hi = _COHORT_BOUNDS[cohort.value]
-    _expr = pl.lit(True)
-    if _lo is not None:
-        _expr = _expr & (pl.col("gh_created_at") >= _lo)
-    if _hi is not None:
-        _expr = _expr & (pl.col("gh_created_at") < _hi)
-    prs_cohort = prs_enriched.filter(_expr)
+    If a sub-filter has nothing selected (or the date range is narrow
+    enough), the cohort collapses to empty — that matches the literal
+    "no PRs match" reading.
+
+    Both ends of the picked range are inclusive *days*, so the upper
+    bound becomes a half-open `< end + 1 day` on the UTC timestamp
+    column."""
+    _lo_day, _hi_day = cohort_range.value
+    _lo = datetime(_lo_day.year, _lo_day.month, _lo_day.day, tzinfo=timezone.utc)
+    _hi = datetime(
+        _hi_day.year, _hi_day.month, _hi_day.day, tzinfo=timezone.utc
+    ) + timedelta(days=1)
+    prs_cohort = prs_enriched.filter(
+        (pl.col("gh_created_at") >= _lo) & (pl.col("gh_created_at") < _hi)
+    )
 
     _selected_topics = [t for t, v in zip(available_topics, topic_checks.value) if v]
     if len(_selected_topics) < len(available_topics):
@@ -543,8 +647,9 @@ def _(
     if len(_selected_types) < len(available_pr_types):
         prs_cohort = prs_cohort.filter(pl.col("pr_type").is_in(_selected_types))
 
-    cohort_label = cohort.value
-    return cohort_label, prs_cohort
+    cohort_hi_day, cohort_lo_day = _hi_day, _lo_day
+    cohort_label = f"{_lo_day.isoformat()} → {_hi_day.isoformat()}"
+    return cohort_hi_day, cohort_label, cohort_lo_day, prs_cohort
 
 
 @app.cell(hide_code=True)
@@ -756,8 +861,12 @@ def _(cohort_label, mo, pl, pr_pipeline):
             },
         ]
     )
-    mo.md(f"### Cohort `{cohort_label}` — milestone counts")
-    cohort_summary
+    # vstack so the heading actually renders alongside the table — only
+    # the cell's last expression is displayed, so a bare `mo.md(...)`
+    # line above the frame would be dropped.
+    mo.vstack(
+        [mo.md(f"### Cohort `{cohort_label}` — milestone counts"), cohort_summary]
+    )
     return (cohort_summary,)
 
 
@@ -787,7 +896,7 @@ def _(mo):
 
 
 @app.cell(disabled=True, hide_code=True)
-def _(go, pr_pipeline, sankey_height, show_cycle_branches):
+def _(cohort_label, go, pr_pipeline, sankey_height, show_cycle_branches):
     """Build the Sankey from per-PR path classifications.
 
     Each PR contributes one path = sequence of nodes; the function below
@@ -984,7 +1093,7 @@ def _(go, pr_pipeline, sankey_height, show_cycle_branches):
     )
     sankey_fig.update_layout(
         title=dict(
-            text="mathlib4 PR lifecycle flow (2024-02-15 to 2026-05-21)",
+            text=f"mathlib4 PR lifecycle flow ({cohort_label})",
             font=dict(color="black"),
         ),
         font=dict(size=20),
@@ -2777,7 +2886,8 @@ def _(Path, is_wasm, mo):
 def _(
     available_pr_types,
     available_topics,
-    cohort,
+    cohort_hi_day,
+    cohort_lo_day,
     cohort_summary,
     cycle_count_fig,
     cycle_table,
@@ -2899,9 +3009,13 @@ def _(
         _df.write_csv(_path)
         _written.append(_path.name)
 
-    # settings.json — enough to reproduce the cohort exactly
+    # settings.json — enough to reproduce the cohort exactly. The date
+    # range is recorded literally (both ends inclusive) rather than as a
+    # preset name, since the preset is only a seed and may have been
+    # hand-edited since it was picked.
     _settings = {
-        "cohort": cohort.value,
+        "cohort_start": cohort_lo_day.isoformat(),
+        "cohort_end": cohort_hi_day.isoformat(),
         "show_cycle_branches": bool(show_cycle_branches.value),
         "sankey_height": int(sankey_height.value),
         "topics_selected": [
