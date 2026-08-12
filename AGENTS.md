@@ -8,10 +8,11 @@ This file gives coding agents repo-specific guidance for `qb-notebook`.
 - Package layout: `qb_notebook/` — data/IO + plotting helpers (`artifacts`,
   `data_io`, `filters`, `intervals`, `plotting`, `generate_plot_site`,
   `wasm_io`) plus the review-analysis helpers (`review_states`, `pr_shape`,
-  `teams`, `temporal`, `assignments`)
+  `teams`, `temporal`, `assignments`) and the Zulip reader (`zulip_io`)
 - Main data shape: parquet files under `data/`, produced upstream by
   [`queueboard-core`](https://github.com/leanprover-community/queueboard-core)
-  (see "Upstream data source" below).
+  (see "Upstream data source" below). `zulip_io` is the one exception — it
+  reads the Zulip API and caches to `zulip_cache/`, not `data/`.
 - Main usage modes:
   - library-style helpers (`qb_notebook.data_io`, `qb_notebook.filters`,
     `qb_notebook.intervals`, `qb_notebook.plotting`, plus the
@@ -23,7 +24,8 @@ This file gives coding agents repo-specific guidance for `qb-notebook`.
     - marimo (`marimo/*.py`): reactive notebooks for the review-analysis
       project (reader's guide:
       `docs/review-analysis/notebooks.md`; background:
-      `docs/review-analysis-plan.md`)
+      `docs/review-analysis-plan.md`), plus `personal_logs` on the Zulip
+      data (see "Zulip Personal Logs" below)
   - static plot generation (`qb_notebook/generate_plot_site.py`)
 
 ## Environment and Tooling
@@ -242,10 +244,46 @@ step).
   frame per ruleset, and ruleset 3 is the one currently driving the
   dashboard plots.
 
+## Zulip Personal Logs
+
+`qb_notebook/zulip_io.py` reads a channel of the Mathlib Initiative Zulip
+(`mathlib-initiative.zulipchat.com`) over the REST API and counts the mathlib4
+PRs cited in it. The `marimo/personal_logs.py` notebook plots those counts.
+
+- Credentials: a `zuliprc` (ini, `[api]` section with `email` / `key` / `site`)
+  found via `$ZULIPRC`, `./zuliprc`, or `~/.zuliprc`. **`zuliprc` is
+  gitignored** — never commit it, and don't echo `api_key` (it is `repr=False`
+  on `ZulipCredentials` for that reason).
+- Refresh the cache: `uv run python -m scripts.sync_zulip_logs`
+  (`--list-channels` to see what the bot can read, `--full-refresh` to
+  redownload, `--summary` for per-sender totals). The sync is **incremental**
+  on message id, so edits to already-cached messages need `--full-refresh`.
+- Cache location: gitignored `zulip_cache/<channel-slug>.parquet`. Deliberately
+  **not** `data/` — `artifacts.download_and_extract_latest_successful_workflow_artifacts`
+  does `shutil.rmtree(data/)`. The cache holds people's personal work logs
+  verbatim; keep it local.
+- **Messages are fetched as rendered HTML** (`apply_markdown=true`) and PR
+  references come from `<a href=...>` targets, not from raw markdown. The realm
+  defines linkifiers that expand `#12345`, `mathlib#12345`, `!4#12345` and
+  `owner/repo#123` into real PR links, so the rendered HTML already holds every
+  link a reader sees — no need to reimplement Zulip's linkifier engine. It also
+  avoids false positives (`## 10 Aug 2026` is a heading, not PR 10). If you add
+  URL patterns, extend `_PR_URL_RE`; `pr_numbers_in_html` dedupes per message.
+- Pipeline: `sync_channel_messages` → `extract_pr_references` (one row per
+  message × distinct PR) → `pr_mentions_per_day` → `with_rolling_mean`.
+- `pr_mentions_per_day` returns a **dense** calendar (quiet days are explicit
+  zeros). This is load-bearing: logs land weekly-ish, and `rolling_mean` is
+  row-order-based, so smoothing a sparse series would average over a far longer
+  calendar span than the nominal window. Pass `over=[...]` to `with_rolling_mean`
+  whenever the frame is grouped, or the mean bleeds across groups.
+
 ## Testing Expectations
 
 - If touching `qb_notebook/intervals.py`, `qb_notebook/filters.py`, or
   `qb_notebook/data_io.py`, add/update unit tests under `tests/`.
+- `qb_notebook/zulip_io.py` is covered by `tests/test_zulip_io.py`, which is
+  fully offline (no network) — keep link-extraction and daily-aggregation
+  changes tested there rather than against the live API.
 - For plot-site changes, at minimum run:
   - `uv run python -m py_compile qb_notebook/generate_plot_site.py`
   - `uv run python -m qb_notebook.generate_plot_site --data-dir data --site-dir /tmp/qb-plot-site-check`
@@ -258,6 +296,9 @@ step).
   adding transformations.
 - Polars `rolling_mean` is row-order-based, not time-based — always sort by
   date before taking a rolling mean over daily series.
+- Polars `sort(descending=True)` puts nulls **first** unless you pass
+  `nulls_last=True`. A rolling mean's leading rows are null, so "find the peak"
+  on a smoothed column must drop nulls first or it returns a null row.
 - Nullable integer FK columns from Postgres arrive as Float64 in parquet;
   cast to `Int64` (or use the `_cast_float_to_nullable_int` helper) before
   joining.

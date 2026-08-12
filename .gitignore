@@ -17,3 +17,7 @@ running stats.xlsx
 
 # zulip credentials
 zuliprc
+
+# Cached Zulip messages (people's personal work logs, verbatim). Kept out of
+# data/, which artifacts.download_and_extract_... deletes wholesale.
+zulip_cache/

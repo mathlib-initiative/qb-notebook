@@ -153,6 +153,13 @@ Cross-cutting helpers already in place:
 - `qb_notebook.teams` — YAML loader for reviewer / maintainer team
   membership (needs a sibling `leanprover-community.github.io`
   checkout).
+- `qb_notebook.zulip_io` — Zulip channel reader + mathlib4 PR-link
+  extraction, used by `personal_logs.py`. That notebook is the one here
+  that does **not** read `data/`: its source is the gitignored
+  `zulip_cache/personal_logs.parquet` (see the root AGENTS.md section
+  "Zulip Personal Logs"). It degrades gracefully via `mo.stop` when the
+  cache is absent, so it renders without credentials — keep that guard
+  if you extend it.
 
 See [`docs/review-analysis/notebooks.md`](../docs/review-analysis/notebooks.md)
 for which notebook uses what, and the plan index's
