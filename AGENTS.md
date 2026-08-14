@@ -168,6 +168,45 @@ Conventions:
   2. adding `render_*` functions returning `matplotlib.figure.Figure`
   3. adding a `PlotDefinition` to `PLOTS` in desired display order
 
+## Weekly Meeting Stats
+
+`scripts/weekly_report.py` (logic in `qb_notebook/weekly_report.py`) assembles the
+weekly Mathlib Initiative meeting numbers and prints a paste-ready
+Today / Last / Avg8w / Diff table. It replaces the old manual flow
+(`scripts/pr_table.sh`, `scripts/decl-log.sh`, and the queueboard JSON + `jq`
+step).
+
+- Run from the repo root:
+  - `uv run python -m scripts.weekly_report` (this week; `--dry-run` to preview)
+  - `uv run python -m scripts.weekly_report --anchor 2026-07-20 --tactic-docs 125`
+- Data sources: queueboard counts + top-10 review times scrape the **public**
+  dashboard (`leanprover-community.github.io/queueboard`) by default, with the
+  open-PR total via `gh` search `total_count`; set `QUEUEBOARD_API_BASE_URL` (or
+  `--queueboard-api-base`) to use the JSON snapshot API instead. Commit counts
+  come from `git log upstream/master` over the reported week (needs a `../mathlib4`
+  checkout with an `upstream` remote). Definitions/theorems scrape
+  `mathlib_stats.html`.
+- The one non-automatable metric, "#rewritten tactic docs", is carried forward and
+  flagged; pass `--tactic-docs N` to set it.
+- The time series lives in a **gitignored** CSV (`weekly_stats.csv`, path via
+  `--store`), not committed. It stores cumulative def/theorem totals so weekly
+  deltas self-heal after the first run.
+- Each (non-dry) run also writes the slide table to a gitignored
+  `weekly_report.csv` (path via `--report-csv`): import into Google Sheets,
+  then copy-paste the range into Slides (Slides won't take raw CSV text).
+- Missed weeks are only partly reconstructable. The queueboard/open-PR numbers
+  are live scrapes (today only); refill those by hand-adding a row to
+  `weekly_stats.csv` from that week's slides. Commit counts are historical via
+  `git log`, and the def/theorem counts *can* be reconstructed after the fact:
+  `scripts/backfill_decls.py` reads each dated snapshot of `mathlib_stats.html`
+  from the git history of a `../leanprover-community.github.io` checkout (its
+  `master` branch is the rendered, daily-committed site) and fills the
+  `defs_total`/`thms_total` columns, recomputing the weekly deltas as true
+  7-day windows (`total(D) - total(D-7)`, robust to skipped weeks). It is
+  dry-run by default; pass `--write` to apply. Rows are sorted on read, so
+  append order doesn't matter. The report script warns when the "Last" baseline
+  is more than one week old.
+
 ## Coding Conventions for This Repo
 
 - Prefer Polars expressions and dataframe operations over pandas unless
