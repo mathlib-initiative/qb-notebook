@@ -75,15 +75,31 @@ MATHLIB_LABEL_RETIRED_AT: Mapping[str, datetime] = {
 # before the corresponding label was applied — important for ``delegated``
 # attribution (where the bors reply normally lands seconds before the
 # label) and also responsible for ~1 % of ``ready-to-merge`` mis-attributions.
-# The mathlib bot accounts were **renamed on 2026-02-03** (the ``mathlib4-*``
-# logins stop dead on 2026-02-02 and the ``mathlib-*`` successors start the
-# next day). Both spellings are kept: the old ones still own all pre-rename
-# history. Nothing in the exported data marks an actor as a bot — GitHub's
-# ``actor.__typename`` is fetched upstream but not persisted (see
-# queueboard-core design doc 051) — so this list is the only bot signal we
-# have, and it goes stale silently. Adding a name here changes every
+# On **2026-02-03** the ``mathlib4-*`` bot logins stop dead and the
+# ``mathlib-*`` ones start the next day. This was originally recorded here as
+# a rename; it was not. Resolved against the live GraphQL API on 2026-08-15:
+#
+#   mathlib4-merge-conflict-bot    User  U_kgDODVl3LA
+#   mathlib-merge-conflicts        Bot   BOT_kgDOD2_IkQ
+#   mathlib4-dependent-issues-bot  User  U_kgDOCsITAQ
+#   mathlib-dependent-issues       Bot   BOT_kgDOD2_cBQ
+#
+# The old logins still resolve to their original accounts, and the new ones
+# are different accounts of a different kind — the machine-user bots were
+# **replaced by GitHub Apps**. So both spellings must stay: the old accounts
+# own all pre-2026-02-03 history and no key, node id included, bridges the
+# substitution.
+#
+# Nothing in the exported data marks an actor as a bot *yet*, so this list is
+# currently the only bot signal we have and it goes stale silently.
+# queueboard-core design doc 051 adds ``actor_type`` / ``actor_node_id`` to
+# ``syncer_prtimelineevent``; once a post-backfill export carries them, the
+# ``Bot``-typed accounts here drop out of this list entirely and the residual
+# machine users (``leanprover-community-*``, ``leanprover-radar``, and the two
+# retired ``mathlib4-*`` accounts, all of which report ``User``) get keyed on
+# node id instead of login. Until then: adding a name here changes every
 # first-touch-derived metric, so prefer over- to under-inclusion, but never
-# add a human: ``bottine`` and ``guptbot`` are human contributors whose logins
+# add a human — ``bottine`` and ``guptbot`` are human contributors whose logins
 # merely look bot-like.
 DEFAULT_BOT_ACTORS: frozenset[str] = frozenset(
     {
@@ -97,10 +113,11 @@ DEFAULT_BOT_ACTORS: frozenset[str] = frozenset(
         "mathlib-bors",
         "bors",
         "leanprover-radar",
-        # Renamed 2026-02-03 from the ``mathlib4-*`` spellings above.
+        # GitHub Apps that took over from the ``mathlib4-*`` machine users
+        # above on 2026-02-03. Separate accounts, not renames.
         "mathlib-merge-conflicts",
         "mathlib-dependent-issues",
-        # Post-rename additions and older accounts that were never listed.
+        # Later additions and older accounts that were never listed.
         "mathlib-auto-merge",
         "mathlib-splicebot",
         "leanprover-bot",
