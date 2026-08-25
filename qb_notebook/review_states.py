@@ -90,14 +90,25 @@ MATHLIB_LABEL_RETIRED_AT: Mapping[str, datetime] = {
 # own all pre-2026-02-03 history and no key, node id included, bridges the
 # substitution.
 #
-# Nothing in the exported data marks an actor as a bot *yet*, so this list is
-# currently the only bot signal we have and it goes stale silently.
-# queueboard-core design doc 051 adds ``actor_type`` / ``actor_node_id`` to
-# ``syncer_prtimelineevent``; once a post-backfill export carries them, the
-# ``Bot``-typed accounts here drop out of this list entirely and the residual
-# machine users (``leanprover-community-*``, ``leanprover-radar``, and the two
-# retired ``mathlib4-*`` accounts, all of which report ``User``) get keyed on
-# node id instead of login. Until then: adding a name here changes every
+# ``syncer_prtimelineevent`` now carries ``actor_type`` / ``actor_node_id``
+# (queueboard-core design doc 051; production drain finished 2026-08-24).
+# This list is therefore **no longer the only bot signal** — but it is still
+# load-bearing, and more so than doc 051's Consequences section suggests.
+# See :func:`bot_actor_expr` for the three-leg predicate that supersedes a
+# bare membership test, and ``docs/schema-notes.md`` for the measurements.
+#
+# Why this list cannot be deleted, measured on the 2026-08-24 export:
+# 42,141 of the 42,289 ``actor_type IS NULL`` rows *do* carry a login, and
+# 41,329 of those are a single account — ``leanprover-community-mathlib4-bot``
+# (active 2023-07 → 2026-02), which has **no ``actor_node_id`` either**. It
+# is login-keyable or nothing. Across all known automation the login leg is
+# the only thing typing ~42,009 bot events, 3,067 of them first-touch-eligible
+# ``ISSUE_COMMENTED`` rows.
+#
+# Keep this list complete rather than minimal: it is also the entire fallback
+# when an older artifact lacks the typed columns. Accounts that report
+# ``Bot`` are listed here anyway for that path, even though the type leg
+# catches them on a current export. Adding a name changes every
 # first-touch-derived metric, so prefer over- to under-inclusion, but never
 # add a human — ``bottine`` and ``guptbot`` are human contributors whose logins
 # merely look bot-like.
@@ -127,8 +138,136 @@ DEFAULT_BOT_ACTORS: frozenset[str] = frozenset(
         # Automated reviewers: genuine review signal, but not human.
         "copilot-pull-request-reviewer",
         "copilot-swe-agent",
+        # Dependency / nolint automation. ``mathlib4-update-dependencies-bot``
+        # is a machine *user* (reports ``User``) that was never listed here —
+        # it drove 765 label events that this module counted as human until
+        # ``actor_type`` made the omission visible. The other two are the
+        # GitHub Apps that replaced it and are ``Bot``-typed; they are listed
+        # only so the no-typed-columns fallback path stays correct.
+        "mathlib4-update-dependencies-bot",
+        "mathlib-update-dependencies",
+        "mathlib-nolints",
     }
 )
+
+# GraphQL node ids of *machine users* — ordinary user accounts driven by
+# automation. GitHub types these ``User``, exactly like a human, so no
+# ``actor_type`` test can separate them and a list is unavoidable. Keying on
+# node id rather than login is what makes the list durable: a node id is
+# permanent, and every account here is historical and frozen.
+#
+# Do **not** add ``Bot``-typed accounts here — they need no entry at all,
+# which is the entire point of doc 051. Do not try to bridge the 2026-02-03
+# changeover with these either: the ``mathlib4-*`` machine users were
+# *replaced by* ``mathlib-*`` GitHub Apps, and a new account is a new account.
+#
+# Measured on the 2026-08-24 export; the count is events attributed to each.
+MACHINE_USER_NODE_IDS: frozenset[str] = frozenset(
+    {
+        "U_kgDOBcsTTQ",  # leanprover-community-bot-assistant   10,499
+        "U_kgDOCsITAQ",  # mathlib4-dependent-issues-bot         8,103
+        "U_kgDODVl3LA",  # mathlib4-merge-conflict-bot           7,564
+        "MDQ6VXNlcjg1NjY4Mzk0",  # leanprover-bot                3,031
+        "U_kgDOCG88RQ",  # leanprover-radar                      1,713
+        "U_kgDOCsIPOw",  # mathlib4-update-dependencies-bot      1,126
+    }
+)
+
+
+def _string_columns(
+    source: pl.DataFrame | pl.LazyFrame | Mapping[str, object],
+) -> frozenset[str]:
+    """Names of columns in ``source`` that are present *and* typed ``String``.
+
+    The dtype check is the load-bearing half. A parquet artifact exported
+    while the upstream backfill was mid-drain carries ``actor_type`` as an
+    all-null ``Float64`` (``double``) column rather than a string — the same
+    shape ``requested_team_slug`` still has in current artifacts. Such a
+    column means "no data", **not** "no bots", so it must be treated exactly
+    like an absent column.
+    """
+    if isinstance(source, pl.DataFrame):
+        schema: Mapping[str, object] = source.schema
+    elif isinstance(source, pl.LazyFrame):
+        schema = source.collect_schema()
+    else:
+        schema = source
+    return frozenset(name for name, dtype in schema.items() if dtype == pl.String)
+
+
+def bot_actor_expr(
+    source: pl.DataFrame | pl.LazyFrame | Mapping[str, object],
+    *,
+    bot_actors: Iterable[str] = DEFAULT_BOT_ACTORS,
+    machine_user_node_ids: Iterable[str] = MACHINE_USER_NODE_IDS,
+    actor_col: str = "actor_login",
+    type_col: str = "actor_type",
+    node_id_col: str = "actor_node_id",
+) -> pl.Expr:
+    """A boolean :class:`polars.Expr` that is true for bot-driven rows.
+
+    Bot classification is the **union of three tests**, not a replacement of
+    the login list. Each leg is load-bearing, measured on the 2026-08-24
+    mathlib4 export (607,585 timeline events):
+
+    1. ``actor_type == "Bot"`` — 225,706 events. Catches every GitHub App,
+       including ones nobody has listed anywhere, with no code change. This
+       is the whole win: the next App the maintainers add is caught for free.
+    2. ``actor_node_id`` in :data:`MACHINE_USER_NODE_IDS` — 32,036 events.
+       Machine users report ``User``, indistinguishable by type from a human,
+       so they still need a list; keying it on the permanent node id rather
+       than the login is what stops it going stale on renames.
+    3. ``actor_login`` in ``bot_actors`` — the fallback, and far from
+       vestigial: ~42,009 events carry a known automation login with
+       ``actor_type IS NULL``, 3,067 of them first-touch-eligible
+       ``ISSUE_COMMENTED`` rows. 41,329 belong to
+       ``leanprover-community-mathlib4-bot``, which has no node id either and
+       so is login-keyable or nothing.
+
+    ``actor_type IS NULL`` means *unknown*, never ``User`` — 7.0 % of rows,
+    permanently. That is why leg 3 cannot be dropped once legs 1 and 2 exist.
+
+    Legs whose column is absent or not ``String``-typed are silently omitted,
+    so the same call works against all three artifact shapes: columns absent
+    (any export predating the deploy), present but all-null ``Float64`` (an
+    export that ran mid-drain), and present with string values (the target).
+    Callers therefore never need to branch on artifact vintage.
+
+    The returned expression is null-safe: ``is_in`` yields null on a null
+    input, which would otherwise propagate through ``~`` and silently drop
+    rows, so the union is wrapped in ``fill_null(False)``. Unknown actors
+    count as non-bots.
+
+    Comparison on ``actor_col`` is case-insensitive; node ids and
+    ``actor_type`` are matched exactly, as GitHub emits them.
+
+    Use it with whatever filtering style the call site already has::
+
+        events.filter(~bot_actor_expr(events))                  # drop bots
+        events.with_columns(bot_actor_expr(events).alias("is_bot"))
+    """
+    usable = _string_columns(source)
+    legs: list[pl.Expr] = []
+
+    if type_col in usable:
+        legs.append(pl.col(type_col) == "Bot")
+
+    node_ids = list(machine_user_node_ids)
+    if node_id_col in usable and node_ids:
+        legs.append(pl.col(node_id_col).is_in(node_ids))
+
+    logins = [b.lower() for b in bot_actors]
+    if actor_col in usable and logins:
+        legs.append(pl.col(actor_col).str.to_lowercase().is_in(logins))
+
+    if not legs:
+        return pl.lit(False)
+
+    combined = legs[0]
+    for leg in legs[1:]:
+        combined = combined | leg
+    return combined.fill_null(False)
+
 
 # Timeline event types that count as a human "trigger" preceding a
 # bot-applied label. Top-level PR comments (`ISSUE_COMMENTED`) carry the
@@ -443,7 +582,7 @@ def attribute_label_events(
     - ``gap_seconds`` (``label_at - trigger_at`` in seconds),
     - ``attributed`` (bool — ``inferred_actor`` is not null).
     """
-    bots = list(bot_actors)
+    is_bot = bot_actor_expr(df_events, bot_actors=bot_actors)
     trigger_list = list(trigger_types)
 
     labels = (
@@ -462,9 +601,7 @@ def attribute_label_events(
 
     triggers = (
         df_events.filter(pl.col("type").is_in(trigger_list))
-        .filter(
-            ~pl.col("actor_login").is_in(bots) & pl.col("actor_login").is_not_null()
-        )
+        .filter(~is_bot & pl.col("actor_login").is_not_null())
         .drop_nulls(["pull_request_id", "occurred_at"])
         .select(
             [
@@ -563,7 +700,7 @@ def first_review_touch(
     ``first_touch_actor``, ``first_touch_event_type``,
     ``first_touch_seconds_from_open`` (float seconds; null when no touch).
     """
-    bots = frozenset(b.lower() for b in bot_actors)
+    is_bot = bot_actor_expr(df_events, bot_actors=bot_actors)
     types = list(event_types)
 
     pr_keys = df_prs.select(
@@ -577,8 +714,8 @@ def first_review_touch(
     candidates = (
         df_events.filter(pl.col("type").is_in(types))
         .drop_nulls(["pull_request_id", "occurred_at", "actor_login"])
+        .filter(~is_bot)
         .with_columns(pl.col("actor_login").str.to_lowercase().alias("_actor_lc"))
-        .filter(~pl.col("_actor_lc").is_in(list(bots)))
         .join(pr_keys, on="pull_request_id", how="inner")
         .filter(
             (pl.col("_actor_lc") != pl.col("_author_lc"))

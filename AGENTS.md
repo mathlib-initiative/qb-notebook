@@ -111,6 +111,21 @@ in queueboard-core #164 (2026-05): `ISSUE_COMMENTED`, `REVIEW_APPROVED`,
 `LABELED` / `UNLABELED` / `CLOSED` / etc. Comment bodies are **not**
 exported.
 
+The `events` frame also carries `actor_type` (GitHub's `__typename`:
+`User` / `Bot` / `Mannequin` / NULL) and `actor_node_id` (stable across
+login renames), added upstream by queueboard-core design doc 051 and
+drained on 2026-08-24. **`actor_type IS NULL` means unknown, never
+`User`** — 7 % of mathlib4 rows, permanently.
+
+Never hand-roll a bot filter. Use
+`qb_notebook.review_states.bot_actor_expr(frame)`, which returns a
+`pl.Expr` for the union of three tests (`actor_type == "Bot"`, node id in
+`MACHINE_USER_NODE_IDS`, login in `DEFAULT_BOT_ACTORS`) and silently drops
+legs the artifact can't support. All three legs are load-bearing, and
+older artifacts either lack the columns or carry them as all-null
+`Float64` — see `docs/schema-notes.md` for the measurements and the
+reasoning.
+
 The full set of parquet files currently present in `data/` is broader and
 also includes: `analyzer_prdependency`, `analyzer_prdependencystate`,
 `analyzer_prqueuewindowbuildstate`, `analyzer_prrevision`,

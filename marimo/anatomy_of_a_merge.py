@@ -168,6 +168,7 @@ def _(is_wasm):
     from qb_notebook.review_states import (
         DEFAULT_BOT_ACTORS,
         MATHLIB_LABEL_RETIRED_AT,
+        bot_actor_expr,
         inline_comment_stats,
         label_intervals,
         labels_active_at,
@@ -182,6 +183,7 @@ def _(is_wasm):
         MATHLIB_LABEL_RETIRED_AT,
         Path,
         author_cohort,
+        bot_actor_expr,
         bucket_labels,
         date,
         datetime,
@@ -2542,7 +2544,8 @@ def _(mo):
     ## 6. Review activity per PR
 
     Three review-depth signals per merged PR (with bots filtered out via
-    `DEFAULT_BOT_ACTORS`):
+    `bot_actor_expr` — the union of `actor_type == "Bot"`, the machine-user
+    node-id list, and `DEFAULT_BOT_ACTORS`):
 
     - `n_review_events_by_others` — non-author `REVIEW_*` events
     - `n_issue_comments_by_others` — non-author top-level comments
@@ -2566,7 +2569,7 @@ def _(mo):
 
 @app.cell
 def _(
-    DEFAULT_BOT_ACTORS,
+    bot_actor_expr,
     events,
     inline_comment_stats,
     inline_comments,
@@ -2578,14 +2581,16 @@ def _(
         pl.col("id").alias("pull_request_id"),
         pl.col("author_login").str.to_lowercase().alias("_author_lc"),
     )
-    _bots_lc = [b.lower() for b in DEFAULT_BOT_ACTORS]
+    # Same three-leg predicate the library helpers use (actor_type / node id /
+    # login), so this cell can't drift back to login-only classification.
+    _is_bot = bot_actor_expr(events)
 
     _review_types = ("REVIEW_APPROVED", "REVIEW_COMMENTED", "REVIEW_CHANGES_REQUESTED")
     _ev_classified = (
         events.filter(pl.col("type").is_in(["ISSUE_COMMENTED", *_review_types]))
+        .filter(~_is_bot)
         .join(_author_keys, on="pull_request_id", how="inner")
         .with_columns(pl.col("actor_login").str.to_lowercase().alias("_actor_lc"))
-        .filter(~pl.col("_actor_lc").is_in(_bots_lc))
         .filter(
             (pl.col("_actor_lc") != pl.col("_author_lc"))
             | pl.col("_author_lc").is_null()

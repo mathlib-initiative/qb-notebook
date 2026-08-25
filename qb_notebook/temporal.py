@@ -26,7 +26,7 @@ from collections.abc import Iterable, Sequence
 
 import polars as pl
 
-from qb_notebook.review_states import DEFAULT_BOT_ACTORS
+from qb_notebook.review_states import DEFAULT_BOT_ACTORS, bot_actor_expr
 
 # Polars dt.weekday() returns 1..7 (Mon=1, Sun=7). All helpers in this
 # module normalise to 0..6 (Mon=0, Sun=6) so downstream code matches
@@ -169,8 +169,7 @@ def actor_activity_window(
     if event_types is not None:
         df = df.filter(pl.col("type").is_in(list(event_types)))
     if exclude_bots:
-        bots_lc = [b.lower() for b in bot_actors]
-        df = df.filter(~pl.col(actor_col).str.to_lowercase().is_in(bots_lc))
+        df = df.filter(~bot_actor_expr(df, bot_actors=bot_actors, actor_col=actor_col))
 
     histogram = (
         df.with_columns(pl.col(ts_col).dt.hour().cast(pl.Int64).alias("__hour"))

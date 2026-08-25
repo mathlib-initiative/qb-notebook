@@ -3,8 +3,11 @@ from datetime import datetime, timedelta, timezone
 import polars as pl
 
 from qb_notebook.review_states import (
+    DEFAULT_BOT_ACTORS,
+    MACHINE_USER_NODE_IDS,
     MATHLIB_LABEL_RETIRED_AT,
     attribute_label_events,
+    bot_actor_expr,
     first_review_touch,
     inline_comment_stats,
     label_intervals,
@@ -2037,3 +2040,250 @@ def test_pipeline_stages_without_merged_column() -> None:
     assert row["seconds_open_to_first_touch"] == _SECONDS_PER_DAY
     assert row["seconds_ready_to_merge_to_merged"] is None
     assert row["seconds_open_to_merged"] is None
+
+
+# ---------------------------------------------------------------------------
+# bot_actor_expr — the three-leg predicate and the three artifact shapes
+# ---------------------------------------------------------------------------
+
+# A real machine-user node id (leanprover-community-bot-assistant), so the
+# test breaks if the constant is edited without thinking.
+_MACHINE_NODE_ID = "U_kgDOBcsTTQ"
+
+
+def _typed_events(
+    rows: list[dict],
+    *,
+    type_dtype: pl.DataType = pl.String,
+    node_dtype: pl.DataType = pl.String,
+) -> pl.DataFrame:
+    """Events frame carrying ``actor_type`` / ``actor_node_id``.
+
+    ``type_dtype`` / ``node_dtype`` let a test reproduce the mid-drain export
+    shape, where the columns exist but arrive as all-null ``Float64``.
+    """
+    return pl.DataFrame(
+        rows,
+        schema={
+            "pull_request_id": pl.Int64,
+            "occurred_at": pl.Datetime("us", "UTC"),
+            "type": pl.String,
+            "label_name": pl.String,
+            "actor_login": pl.String,
+            "actor_type": type_dtype,
+            "actor_node_id": node_dtype,
+        },
+    )
+
+
+def _row(
+    login: str | None,
+    actor_type: str | None = None,
+    node_id: str | None = None,
+    *,
+    pr: int = 1,
+    day: int = 2,
+    ev_type: str = "ISSUE_COMMENTED",
+) -> dict:
+    return {
+        "pull_request_id": pr,
+        "occurred_at": _dt(day),
+        "type": ev_type,
+        "label_name": None,
+        "actor_login": login,
+        "actor_type": actor_type,
+        "actor_node_id": node_id,
+    }
+
+
+def _flags(df: pl.DataFrame) -> list[bool]:
+    return df.select(bot_actor_expr(df).alias("b"))["b"].to_list()
+
+
+def test_bot_actor_expr_type_leg_catches_unlisted_app() -> None:
+    """A ``Bot``-typed account absent from the login list is still a bot.
+
+    This is the whole point of consuming ``actor_type``: the next GitHub App
+    the maintainers add is classified with no code change.
+    """
+    ev = _typed_events(
+        [
+            _row("brand-new-app", "Bot", "BOT_kgDOsomething"),
+            _row("alice", "User", "MDQ6VXNlcjE="),
+        ]
+    )
+    assert "brand-new-app" not in DEFAULT_BOT_ACTORS
+    assert _flags(ev) == [True, False]
+
+
+def test_bot_actor_expr_node_id_leg_catches_machine_user() -> None:
+    """Machine users report ``User``; only the node-id leg can catch them."""
+    ev = _typed_events([_row("renamed-since-ingest", "User", _MACHINE_NODE_ID)])
+    assert _MACHINE_NODE_ID in MACHINE_USER_NODE_IDS
+    # Neither the type leg nor the login leg would fire here.
+    assert "renamed-since-ingest" not in DEFAULT_BOT_ACTORS
+    assert _flags(ev) == [True]
+
+
+def test_bot_actor_expr_login_leg_catches_untyped_bot() -> None:
+    """``actor_type IS NULL`` + a known automation login is still a bot.
+
+    Mirrors ``leanprover-community-mathlib4-bot``: 41,329 events with no
+    ``actor_type`` *and* no ``actor_node_id``, so login is the only key.
+    """
+    ev = _typed_events([_row("leanprover-community-mathlib4-bot", None, None)])
+    assert _flags(ev) == [True]
+
+
+def test_bot_actor_expr_null_type_is_not_user() -> None:
+    """A null ``actor_type`` on an unknown actor means unknown, not bot.
+
+    The complement of the previous test: ``fill_null(False)`` must make the
+    predicate false rather than null, or ``~expr`` would silently drop the row.
+    """
+    ev = _typed_events([_row("some-human", None, None)])
+    flags = _flags(ev)
+    assert flags == [False]
+    assert flags[0] is not None
+
+
+def test_bot_actor_expr_null_login_with_bot_type() -> None:
+    """A typed ``Bot`` with no login at all is still classified."""
+    ev = _typed_events([_row(None, "Bot", "BOT_kgDOx")])
+    assert _flags(ev) == [True]
+
+
+def test_bot_actor_expr_login_leg_is_case_insensitive() -> None:
+    ev = _typed_events([_row("GitHub-Actions", None, None)])
+    assert _flags(ev) == [True]
+
+
+# --- the three artifact shapes ---------------------------------------------
+
+
+def test_bot_actor_expr_shape_1_columns_absent() -> None:
+    """Shape 1: an export predating the deploy has neither column."""
+    ev = _events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(2),
+                "type": "ISSUE_COMMENTED",
+                "label_name": None,
+                "actor_login": login,
+            }
+            for login in ("mathlib-bors", "alice")
+        ]
+    )
+    assert "actor_type" not in ev.columns
+    assert _flags(ev) == [True, False]
+
+
+def test_bot_actor_expr_shape_2_all_null_float_columns() -> None:
+    """Shape 2: a mid-drain export types the columns ``Float64``, all null.
+
+    ``pl.Float64`` on ``actor_type`` means "no data", not "no bots" — the
+    leg must be dropped and the login list must still classify. Comparing
+    a ``Float64`` column against the string ``"Bot"`` would otherwise raise
+    or silently yield null for every row.
+    """
+    ev = _typed_events(
+        [
+            {
+                "pull_request_id": 1,
+                "occurred_at": _dt(2),
+                "type": "ISSUE_COMMENTED",
+                "label_name": None,
+                "actor_login": login,
+                "actor_type": None,
+                "actor_node_id": None,
+            }
+            for login in ("mathlib-bors", "alice")
+        ],
+        type_dtype=pl.Float64,
+        node_dtype=pl.Float64,
+    )
+    assert ev.schema["actor_type"] == pl.Float64
+    assert _flags(ev) == [True, False]
+
+
+def test_bot_actor_expr_shape_3_string_columns() -> None:
+    """Shape 3: the post-drain target — all three legs live."""
+    ev = _typed_events(
+        [
+            _row("brand-new-app", "Bot", "BOT_kgDOz"),
+            _row("whatever", "User", _MACHINE_NODE_ID),
+            _row("mathlib-bors", None, None),
+            _row("alice", "User", "MDQ6VXNlcjE="),
+        ]
+    )
+    assert _flags(ev) == [True, True, True, False]
+
+
+def test_bot_actor_expr_no_usable_columns_yields_false() -> None:
+    """With no login column and no typed columns, nothing can be classified."""
+    ev = pl.DataFrame({"pull_request_id": [1]}, schema={"pull_request_id": pl.Int64})
+    assert _flags(ev) == [False]
+
+
+def test_bot_actor_expr_empty_bot_actors_keeps_type_leg() -> None:
+    """Passing ``bot_actors=[]`` disables only the login leg."""
+    ev = _typed_events(
+        [_row("brand-new-app", "Bot", "BOT_kgDOz"), _row("mathlib-bors", None, None)]
+    )
+    flags = ev.select(bot_actor_expr(ev, bot_actors=[]).alias("b"))["b"].to_list()
+    assert flags == [True, False]
+
+
+# --- end-to-end through the consumers --------------------------------------
+
+
+def test_first_review_touch_skips_bot_typed_actor() -> None:
+    """An unlisted ``Bot`` no longer counts as the first human touch."""
+    prs = _prs_frame([{"id": 1, "gh_created_at": _dt(1), "author_login": "alice"}])
+    ev = _typed_events(
+        [
+            _row("brand-new-app", "Bot", "BOT_kgDOz", day=2),
+            _row("bob", "User", "MDQ6VXNlcjE=", day=3),
+        ]
+    )
+    out = first_review_touch(prs, ev)
+    row = out.row(0, named=True)
+    assert row["first_touch_actor"] == "bob"
+    assert row["first_touch_at"] == _dt(3)
+
+
+def test_first_review_touch_skips_untyped_known_bot() -> None:
+    """The regression the login leg exists to prevent.
+
+    A ``mathlib-dependent-issues`` comment carries ``actor_type IS NULL``
+    because the bot deletes and reposts its own comment, so the node id can
+    never be re-resolved. Filtering on ``actor_type == "Bot"`` alone would
+    count it as a human review touch.
+    """
+    prs = _prs_frame([{"id": 1, "gh_created_at": _dt(1), "author_login": "alice"}])
+    ev = _typed_events(
+        [
+            _row("mathlib-dependent-issues", None, None, day=2),
+            _row("bob", "User", "MDQ6VXNlcjE=", day=3),
+        ]
+    )
+    out = first_review_touch(prs, ev)
+    assert out.row(0, named=True)["first_touch_actor"] == "bob"
+
+
+def test_first_review_touch_unchanged_without_typed_columns() -> None:
+    """Backward compatibility: the login-only path still behaves identically."""
+    prs = _prs_frame([{"id": 1, "gh_created_at": _dt(1), "author_login": "alice"}])
+    rows = [
+        {
+            "pull_request_id": 1,
+            "occurred_at": _dt(day),
+            "type": "ISSUE_COMMENTED",
+            "label_name": None,
+            "actor_login": login,
+        }
+        for day, login in ((2, "mathlib-bors"), (3, "bob"))
+    ]
+    out = first_review_touch(prs, _events(rows))
+    assert out.row(0, named=True)["first_touch_actor"] == "bob"

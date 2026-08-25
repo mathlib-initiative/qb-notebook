@@ -328,3 +328,63 @@ def test_hour_set_overlap_basic() -> None:
     assert hour_set_overlap([0, 1, 2], [10, 11, 12]) == 0
     assert hour_set_overlap([0, 1, 2], []) == 0
     assert hour_set_overlap([7, 7, 7], [7]) == 1
+
+
+# ---------- bot exclusion via the typed columns ------------------------------
+
+
+def _typed(rows: list[dict], actor_type: str | None, node_id: str | None) -> list[dict]:
+    """Attach ``actor_type`` / ``actor_node_id`` to generated rows."""
+    return [{**r, "actor_type": actor_type, "actor_node_id": node_id} for r in rows]
+
+
+def _typed_events(rows: list[dict]) -> pl.DataFrame:
+    return pl.DataFrame(
+        rows,
+        schema={
+            "pull_request_id": pl.Int64,
+            "occurred_at": pl.Datetime("us", "UTC"),
+            "type": pl.String,
+            "label_name": pl.String,
+            "actor_login": pl.String,
+            "actor_type": pl.String,
+            "actor_node_id": pl.String,
+        },
+    )
+
+
+def test_actor_activity_window_excludes_bot_typed_actor() -> None:
+    """A ``Bot``-typed account is dropped even when its login isn't listed.
+
+    Regression guard for the concrete case this change fixed: the
+    dependency-bump bots showed up as ordinary actors in the timezone table,
+    where their perfectly uniform schedule is meaningless.
+    """
+    rows = _typed(_evenly_spread("alice", [14] * 25), "User", "MDQ6VXNlcjE=")
+    rows += _typed(_evenly_spread("brand-new-app", [3] * 25), "Bot", "BOT_kgDOz")
+    out = actor_activity_window(_typed_events(rows), min_events=20)
+    assert out["actor_login"].to_list() == ["alice"]
+
+
+def test_actor_activity_window_excludes_machine_user_by_node_id() -> None:
+    """Machine users report ``User`` — only the node-id leg catches them."""
+    rows = _typed(_evenly_spread("alice", [14] * 25), "User", "MDQ6VXNlcjE=")
+    rows += _typed(_evenly_spread("renamed-bot", [3] * 25), "User", "U_kgDOBcsTTQ")
+    out = actor_activity_window(_typed_events(rows), min_events=20)
+    assert out["actor_login"].to_list() == ["alice"]
+
+
+def test_actor_activity_window_bot_exclusion_without_typed_columns() -> None:
+    """Backward compatibility: login-only exclusion still works untyped."""
+    rows = _evenly_spread("alice", [14] * 25)
+    rows += _evenly_spread("mathlib-bors", [3] * 25)
+    out = actor_activity_window(_events(rows), min_events=20)
+    assert out["actor_login"].to_list() == ["alice"]
+
+
+def test_actor_activity_window_exclude_bots_false_keeps_bots() -> None:
+    """``exclude_bots=False`` bypasses the predicate entirely."""
+    rows = _typed(_evenly_spread("alice", [14] * 25), "User", "MDQ6VXNlcjE=")
+    rows += _typed(_evenly_spread("brand-new-app", [3] * 25), "Bot", "BOT_kgDOz")
+    out = actor_activity_window(_typed_events(rows), min_events=20, exclude_bots=False)
+    assert sorted(out["actor_login"].to_list()) == ["alice", "brand-new-app"]
